@@ -17,6 +17,6 @@ So, the use of a paraphraser on training data could be expected to make a model'
 
 ## Designing the Paraphraser
 
-
+There are two high-level approaches to paraphraser design. The first is a human led RLHF-style design where large scale human input steers an impression of irrelevant details. This 
 
 Note that this work was heavily inspired by the following post - https://www.lesswrong.com/posts/Tzdwetw55JNqFTkzK/why-don-t-we-just-shoggoth-face-paraphraser.
