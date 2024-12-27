@@ -140,10 +140,14 @@ class ParaphrasingLoss(nn.Module):
     
 # Train paraphraser
 
-def train_paraphraser(paraphraser, classifier, train_loader, num_epochs=2):
+def train_paraphraser(paraphraser, classifier, train_loader, device, num_epochs=2):
     """Train the paraphraser with comprehensive logging"""
+    # Ensure models are on the correct device
+    paraphraser = paraphraser.to(device)
+    classifier = classifier.to(device)
+    
     optimizer = optim.Adam(paraphraser.parameters(), lr=0.0001)
-    criterion = ParaphrasingLoss(classifier)
+    criterion = ParaphrasingLoss(classifier)  # Assuming ParaphrasingLoss handles device internally
 
     # For logging
     epoch_accuracies = []
@@ -158,10 +162,14 @@ def train_paraphraser(paraphraser, classifier, train_loader, num_epochs=2):
         running_loss = 0.0
         running_class_loss = 0.0
         running_accuracy = 0.0
-        epoch_confusion = torch.zeros(10, 10)
+        epoch_confusion = torch.zeros(10, 10)  # Initialize on CPU for accumulation
         batch_count = 0
 
         for images, labels in tqdm(train_loader):
+            # Move data to device
+            images = images.to(device)
+            labels = labels.to(device)
+            
             optimizer.zero_grad()
 
             # Generate paraphrased images
@@ -172,7 +180,7 @@ def train_paraphraser(paraphraser, classifier, train_loader, num_epochs=2):
             loss.backward()
             optimizer.step()
 
-            # Accumulate metrics
+            # Accumulate metrics (move confusion matrix to CPU for accumulation)
             running_loss += loss.item()
             running_class_loss += class_loss.item()
             running_accuracy += accuracy
@@ -203,7 +211,7 @@ def train_paraphraser(paraphraser, classifier, train_loader, num_epochs=2):
         print("\nConfusion Matrix (True vs Predicted):")
         confusion_matrix = epoch_confusion.numpy()
         row_sums = confusion_matrix.sum(axis=1, keepdims=True)
-        normalized_confusion = 100 * confusion_matrix / row_sums # percentage scores
+        normalized_confusion = 100 * confusion_matrix / row_sums  # percentage scores
 
         # Print normalized confusion matrix
         print("\nNormalized Confusion Matrix (%):")
@@ -215,21 +223,20 @@ def train_paraphraser(paraphraser, classifier, train_loader, num_epochs=2):
         for i in range(10):
             print(f"{i:2d} |", end="")
             for j in range(10):
-                print(f"{normalized_confusion[i,j]:5.1f}", end="") # i is true, j is predicted
+                print(f"{normalized_confusion[i,j]:5.1f}", end="")  # i is true, j is predicted
             print(f" | {confusion_matrix[i].sum():.0f}")
-        print("-" * 60) # goated line
+        print("-" * 60)
 
-        fig = plt.imshow(normalized_confusion, cmap='viridis', interpolation ='nearest', origin ='lower')
+        # Plot confusion matrix
+        fig = plt.imshow(normalized_confusion, cmap='viridis', interpolation='nearest', origin='lower')
         plt.colorbar(fig)
         plt.title('Confusion on Paraphrased Images')
-        plt.xlabel('True Class') # check this way around. Might be transpossed
+        plt.xlabel('True Class')
         plt.ylabel('Predicted Class')
         plt.show()
 
-        # Visualize examples if it's the first or last epoch
-        #if epoch in [0, num_epochs-1]:
-        # No - visualise all examples
-        visualize_paraphrasing(paraphraser, train_loader, num_samples=10)
+        # Visualize examples
+        visualize_paraphrasing(paraphraser, train_loader, device, num_samples=10)
 
     # Plot training progress
     plt.figure(figsize=(15, 5))
@@ -251,31 +258,39 @@ def train_paraphraser(paraphraser, classifier, train_loader, num_epochs=2):
 
     return epoch_accuracies, epoch_losses, confusion_matrices
 
-# visualise the paraphraser iimages with their original counterparts
-def visualize_paraphrasing(paraphraser, dataloader, num_samples=5):
-    paraphraser.eval()
-    max_num = len(dataloader)
-    rand_index = np.random.randint(0, max_num)
-    #images, labels = next(iter(dataloader))
-    images, labels = dataloader[rand_index] # select random samples to visualise
 
+# visualise the paraphraser iimages with their original counterparts
+def visualize_paraphrasing(paraphraser, train_loader, device, num_samples=10):
+    """Helper function to visualize paraphrased images"""
+    # Get a batch of images
+    images, _ = next(iter(train_loader))
+    images = images[:num_samples].to(device)
+    
+    # Generate paraphrased images
     with torch.no_grad():
         paraphrased = paraphraser(images)
-
-    plt.figure(figsize=(15, 6))
+    
+    # Move tensors to CPU for visualization
+    original_images = images.cpu()
+    paraphrased_images = paraphrased.cpu()
+    
+    # Plot original vs paraphrased
+    plt.figure(figsize=(20, 4))
     for i in range(num_samples):
-        # Original image
+        # Original
         plt.subplot(2, num_samples, i + 1)
-        plt.imshow(images[i].squeeze(), cmap='gray')
-        plt.title(f'Original\nLabel: {labels[i]}')
+        plt.imshow(original_images[i].squeeze(), cmap='gray')
         plt.axis('off')
-
-        # Paraphrased image
-        plt.subplot(2, num_samples, i + num_samples + 1)
-        plt.imshow(paraphrased[i].squeeze(), cmap='gray')
-        plt.title('Paraphrased')
+        if i == 0:
+            plt.title('Original')
+        
+        # Paraphrased
+        plt.subplot(2, num_samples, num_samples + i + 1)
+        plt.imshow(paraphrased_images[i].squeeze(), cmap='gray')
         plt.axis('off')
-
+        if i == 0:
+            plt.title('Paraphrased')
+    
     plt.tight_layout()
     plt.show()
 
@@ -335,10 +350,8 @@ def main():
         classifier.to(device)
     else:
         print("Training classifier from scratch...")
-        # Import necessary components from initial_classifier
-        classifier.to(device) # empty model class
+        classifier.to(device)
         train_classifier(classifier, train_loader, test_loader, device)
-        #os.makedirs(classifier_dir, exist_ok=True) # directory must exist for training to take place
         torch.save(classifier.state_dict(), classifier_path)
     
     # Set classifier to eval mode
@@ -349,8 +362,8 @@ def main():
     print("Training paraphraser...")
     paraphraser.to(device)
     train_paraphraser(paraphraser, classifier, train_loader, device)
-    #os.makedirs(paraphraser_path.parent, exist_ok=True)
     torch.save(paraphraser.state_dict(), paraphraser_path)
+
 
 if __name__ == "__main__":
     main()
