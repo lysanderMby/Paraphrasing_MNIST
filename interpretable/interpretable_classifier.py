@@ -91,17 +91,7 @@ class InterpretableClassifier(nn.Module):
 def train_interpretable_classifier(model, paraphraser, train_loader, test_loader, 
                                  paraphrase_prob=1.0, num_epochs=5, device='cuda', save_dir=None):
     """
-    Train the interpretable classifier. Probabilistically paraphrases intermediate model states at each layer
-    
-    Args:
-        model: The interpretable classifier model
-        paraphraser: The trained paraphraser model
-        train_loader: DataLoader for training data
-        test_loader: DataLoader for test data
-        paraphrase_prob: Probability of applying paraphrasing at each layer including input (0.0 to 1.0)
-        num_epochs: Number of training epochs
-        device: Device to train on
-        save_dir: Directory to save models and metrics
+    Train the interpretable classifier. Probabilistically paraphrases input and intermediate model states.
     """
     model = model.to(device)
     paraphraser = paraphraser.to(device)
@@ -111,8 +101,14 @@ def train_interpretable_classifier(model, paraphraser, train_loader, test_loader
     metrics_log = {
         'paraphrase_prob': paraphrase_prob,
         'train_acc': [],
+        'train_loss': [],
         'test_acc': [],
-        'layer_metrics': {i: {'mse': [], 'cosine_sim': []} for i in range(len(model.layers))}
+        'batch_metrics': {
+            'loss': [],
+            'acc': []
+        },
+        'layer_metrics': {i: {'mse': [], 'cosine_sim': [], 'was_paraphrased': []} 
+                         for i in range(len(model.layers) + 1)}  # +1 for input layer
     }
     
     best_acc = 0.0
@@ -121,48 +117,73 @@ def train_interpretable_classifier(model, paraphraser, train_loader, test_loader
     
     for epoch in range(num_epochs):
         model.train()
-        running_loss = 0.0
+        epoch_loss = 0.0
         correct = 0
         total = 0
-        layer_diffs = [[] for _ in range(len(model.layers))]
+        batch_count = 0
+        layer_diffs = [[] for _ in range(len(model.layers) + 1)]  # +1 for input layer
 
         for batch_idx, (images, labels) in enumerate(tqdm(train_loader)):
             images, labels = images.to(device), labels.to(device)
             optimizer.zero_grad()
             
+            # Handle input paraphrasing
+            was_input_paraphrased = np.random.random() < paraphrase_prob
+            if was_input_paraphrased:
+                with torch.no_grad():
+                    current = paraphraser(images)
+                # Calculate metrics between original and paraphrased input
+                mse = F.mse_loss(images, current).item()
+                cosine_sim = F.cosine_similarity(images.view(images.size(0), -1),
+                                               current.view(current.size(0), -1),
+                                               dim=1).mean().item()
+            else:
+                current = images
+                mse = 0.0  # No paraphrasing occurred
+                cosine_sim = 1.0  # Identity mapping
+            
+            # Store input layer metrics
+            layer_diffs[0].append({
+                'mse': mse, 
+                'cosine_sim': cosine_sim,
+                'was_paraphrased': was_input_paraphrased
+            })
+            
             # Forward pass tracking intermediates
-            current = images
             intermediates = []
             paraphrased_intermediates = []
+            layer_originals = []  # Store original outputs for visualization
             
             # Process through each layer with probabilistic paraphrasing
-            for i, layer in enumerate(model.layers):
+            for i, layer in enumerate(model.layers, 1):  # Start from 1 since 0 is input
                 # Get layer output
                 current = layer(current)
-                intermediates.append(current)
-                
-                # Store original layer output
-                orig_output = current.clone()
+                layer_originals.append(current.clone())  # Store original layer output
                 
                 # Probabilistically apply paraphrasing
-                if np.random.random() < paraphrase_prob:
+                was_paraphrased = np.random.random() < paraphrase_prob
+                if was_paraphrased:
                     with torch.no_grad():
                         paraphrased = paraphraser(current)
+                    # Calculate metrics only if paraphrasing occurred
+                    mse = F.mse_loss(current, paraphrased).item()
+                    cosine_sim = F.cosine_similarity(current.view(current.size(0), -1),
+                                                   paraphrased.view(paraphrased.size(0), -1),
+                                                   dim=1).mean().item()
                 else:
-                    paraphrased = current.clone()
-                    
+                    paraphrased = current
+                    mse = 0.0  # No paraphrasing occurred
+                    cosine_sim = 1.0  # Identity mapping
+                
+                intermediates.append(current)
                 paraphrased_intermediates.append(paraphrased)
                 
-                # Calculate metrics between original and paraphrased versions
-                orig_norm = (orig_output - orig_output.min()) / (orig_output.max() - orig_output.min() + 1e-8)
-                para_norm = (paraphrased - paraphrased.min()) / (paraphrased.max() - paraphrased.min() + 1e-8)
+                layer_diffs[i].append({
+                    'mse': mse, 
+                    'cosine_sim': cosine_sim,
+                    'was_paraphrased': was_paraphrased
+                })
                 
-                mse = F.mse_loss(orig_norm, para_norm).item()
-                cosine_sim = F.cosine_similarity(orig_output.view(orig_output.size(0), -1),
-                                               paraphrased.view(paraphrased.size(0), -1),
-                                               dim=1).mean().item()
-                
-                layer_diffs[i].append({'mse': mse, 'cosine_sim': cosine_sim})
                 current = paraphrased
             
             # Final classification
@@ -177,39 +198,59 @@ def train_interpretable_classifier(model, paraphraser, train_loader, test_loader
             total_loss.backward()
             optimizer.step()
 
-            running_loss += total_loss.item()
+            # Update metrics
+            batch_loss = total_loss.item()
+            epoch_loss += batch_loss
             _, predicted = torch.max(logits.data, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
+            batch_count += 1
 
-            if batch_idx % 500 == 0:
-                visualize_intermediates(images, intermediates, 
-                                     paraphrased_intermediates, paraphraser,
-                                     epoch, batch_idx, paraphrase_prob)
+            # Store batch-level metrics
+            metrics_log['batch_metrics']['loss'].append(batch_loss)
+            metrics_log['batch_metrics']['acc'].append(100 * (predicted == labels).sum().item() / labels.size(0))
+
+            if batch_idx % 100 == 0:  # Reduced frequency for more meaningful plots
+                visualize_intermediates(
+                    original_input=images,
+                    paraphrased_input=current if was_input_paraphrased else None,
+                    layer_originals=layer_originals,
+                    layer_paraphrased=paraphrased_intermediates,
+                    layer_diffs=layer_diffs,
+                    epoch=epoch,
+                    batch_idx=batch_idx
+                )
                 
                 # Log layer statistics
-                for i in range(len(model.layers)):
-                    layer_metrics = layer_diffs[i][-500:]
-                    avg_mse = np.mean([m['mse'] for m in layer_metrics])
-                    avg_cos = np.mean([m['cosine_sim'] for m in layer_metrics])
-                    metrics_log['layer_metrics'][i]['mse'].append(avg_mse)
-                    metrics_log['layer_metrics'][i]['cosine_sim'].append(avg_cos)
+                for i in range(len(model.layers) + 1):
+                    layer_metrics = layer_diffs[i][-100:]  # Use last 100 batches
+                    metrics_log['layer_metrics'][i]['mse'].append(
+                        np.mean([m['mse'] for m in layer_metrics]))
+                    metrics_log['layer_metrics'][i]['cosine_sim'].append(
+                        np.mean([m['cosine_sim'] for m in layer_metrics]))
+                    metrics_log['layer_metrics'][i]['was_paraphrased'].append(
+                        np.mean([m['was_paraphrased'] for m in layer_metrics]))
                     
                 print(f'\nLayer Statistics (Paraphrase Prob: {paraphrase_prob * 100:.1f}%):')
-                for i in range(len(model.layers)):
-                    print(f'Layer {i+1}:')
+                for i in range(len(model.layers) + 1):
+                    layer_name = "Input" if i == 0 else f"Layer {i}"
+                    paraphrase_rate = np.mean([m['was_paraphrased'] for m in layer_diffs[i][-100:]])
+                    print(f'{layer_name}:')
                     print(f'  MSE: {metrics_log["layer_metrics"][i]["mse"][-1]:.4f}')
                     print(f'  Cosine Similarity: {metrics_log["layer_metrics"][i]["cosine_sim"][-1]:.4f}')
+                    print(f'  Actual Paraphrase Rate: {paraphrase_rate * 100:.1f}%')
 
-        # Evaluate
+        # Epoch-level metrics
         train_acc = 100 * correct / total
+        train_loss = epoch_loss / batch_count
         test_acc = evaluate_model(model, test_loader, device)
         
         metrics_log['train_acc'].append(train_acc)
+        metrics_log['train_loss'].append(train_loss)
         metrics_log['test_acc'].append(test_acc)
         
         print(f'\nEpoch {epoch+1} (Paraphrase Prob: {paraphrase_prob * 100:.1f}%):')
-        print(f'Train Acc: {train_acc:.2f}%, Test Acc: {test_acc:.2f}%')
+        print(f'Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, Test Acc: {test_acc:.2f}%')
         
         # Plot training progress
         plot_training_progress(metrics_log)
@@ -275,67 +316,58 @@ def evaluate_model(model, test_loader, device):
     
     return 100 * correct / total
 
-def visualize_intermediates(images, intermediates, paraphrased, paraphraser, epoch, step, num_samples=4):
-    """Visualize random sample of images, their intermediate representations, and paraphrased versions"""
-    batch_size = images.size(0)
-    # Randomly select indices
+def visualize_intermediates(original_input, paraphrased_input, layer_originals, 
+                          layer_paraphrased, layer_diffs, epoch, batch_idx, num_samples=1):
+    """
+    Visualize random sample of images, their intermediate representations, and paraphrased versions.
+    Clearly indicates which versions were actually paraphrased vs copied.
+    """
+    # Set num_samples to 1 for brevity of output. Including a large number of samples gives better visibility over training
+    batch_size = original_input.size(0)
     indices = torch.randperm(batch_size)[:num_samples]
     
     for idx in indices:
-        num_cols = len(intermediates) + 1  # +1 for original image
+        num_cols = len(layer_originals) + 1  # +1 for input
         plt.figure(figsize=(3 * num_cols, 6))
         
-        # Original image and its paraphrased version
+        # Original input
         plt.subplot(2, num_cols, 1)
-        plt.imshow(images[idx].cpu().squeeze(), cmap='gray')
-        plt.title('Original')
+        plt.imshow(original_input[idx].cpu().squeeze(), cmap='gray')
+        plt.title('Original Input')
         plt.axis('off')
         
-        # Paraphrased original (using first paraphraser application)
+        # Input paraphrasing status and visualization
+        was_paraphrased = layer_diffs[0][-1]['was_paraphrased']
+        status = "Paraphrased" if was_paraphrased else "Original"
         plt.subplot(2, num_cols, num_cols + 1)
-        with torch.no_grad():
-            paraphrased_input = paraphraser(images[idx:idx+1].to(images.device))
-        plt.imshow(paraphrased_input[0].cpu().squeeze(), cmap='gray')
-        plt.title('Paraphrased Input')
+        
+        # Show either paraphrased input or original depending on whether paraphrasing occurred
+        display_input = paraphrased_input if was_paraphrased else original_input
+        plt.imshow(display_input[idx].detach().cpu().squeeze(), cmap='gray')
+        plt.title(f'Input ({status})')
         plt.axis('off')
         
-        # Intermediate representations and their paraphrased versions
-        for i, (inter, para) in enumerate(zip(intermediates, paraphrased)):
-            # Original intermediate
+        # Layer outputs and their paraphrased versions
+        for i, (orig, para) in enumerate(zip(layer_originals, layer_paraphrased)):
+            # Original layer output
             plt.subplot(2, num_cols, i + 2)
-            plt.imshow(inter[idx].detach().cpu().squeeze(), cmap='gray')
+            plt.imshow(orig[idx].detach().cpu().squeeze(), cmap='gray')
             plt.title(f'Layer {i+1}')
             plt.axis('off')
             
-            # Paraphrased version
+            # Paraphrasing status for this layer
+            was_paraphrased = layer_diffs[i+1][-1]['was_paraphrased']
+            status = "Paraphrased" if was_paraphrased else "Original"
+            
+            # Paraphrased or original version
             plt.subplot(2, num_cols, num_cols + i + 2)
             plt.imshow(para[idx].detach().cpu().squeeze(), cmap='gray')
-            plt.title(f'Paraphrased L{i+1}')
+            plt.title(f'L{i+1} ({status})')
             plt.axis('off')
         
-        plt.suptitle(f'Epoch {epoch+1}, Step {step}, Sample {idx.item()}')
+        plt.suptitle(f'Epoch {epoch+1}, Step {batch_idx}, Sample {idx.item()}')
         plt.tight_layout()
         plt.show()
-        
-    # Plot activation statistics
-    plt.figure(figsize=(15, 5))
-    for i, (inter, para) in enumerate(zip(intermediates, paraphrased)):
-        plt.subplot(1, len(intermediates), i + 1)
-        
-        # Plot activation distributions
-        inter_vals = inter.detach().cpu().numpy().flatten()
-        para_vals = para.detach().cpu().numpy().flatten()
-        
-        plt.hist(inter_vals, bins=50, alpha=0.5, label='Original', density=True)
-        plt.hist(para_vals, bins=50, alpha=0.5, label='Paraphrased', density=True)
-        
-        plt.title(f'Layer {i+1} Activations')
-        plt.xlabel('Activation Value')
-        plt.ylabel('Density')
-        plt.legend()
-    
-    plt.tight_layout()
-    plt.show()
 
 def plot_training_progress(metrics_log):
     """Plot comprehensive training metrics"""
