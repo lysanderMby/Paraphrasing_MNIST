@@ -21,7 +21,7 @@ parent_dir = str(Path(__file__).resolve().parent.parent)
 sys.path.append(parent_dir)
 
 # Imports from directory
-from initial_classifier.train_classifier import train_classifier, PretrainedClassifier
+from initial_classifier.training_initial_classifier import train_classifier, PretrainedClassifier
 
 class ImageParaphraser(nn.Module):
     # Resnet-based classifier which maximally transforms images while maintaining their classification
