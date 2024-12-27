@@ -89,20 +89,35 @@ class InterpretableClassifier(nn.Module):
         return logits
     
 def train_interpretable_classifier(model, paraphraser, train_loader, test_loader, 
-                                 num_epochs=5, device='cuda', save_dir=None):
-    """Train the interpretable classifier with paraphrasing at each layer"""
+                                 paraphrase_prob=1.0, num_epochs=5, device='cuda', save_dir=None):
+    """
+    Train the interpretable classifier with probabilistic paraphrasing at each layer
+    
+    Args:
+        model: The interpretable classifier model
+        paraphraser: The trained paraphraser model
+        train_loader: DataLoader for training data
+        test_loader: DataLoader for test data
+        paraphrase_prob: Probability of applying paraphrasing at each layer (0.0 to 1.0)
+        num_epochs: Number of training epochs
+        device: Device to train on
+        save_dir: Directory to save models and metrics
+    """
     model = model.to(device)
     paraphraser = paraphraser.to(device)
     criterion = nn.CrossEntropyLoss().to(device)
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     
     metrics_log = {
+        'paraphrase_prob': paraphrase_prob,
         'train_acc': [],
         'test_acc': [],
         'layer_metrics': {i: {'mse': [], 'cosine_sim': []} for i in range(len(model.layers))}
     }
     
     best_acc = 0.0
+    
+    print(f"\nTraining with paraphrase probability: {paraphrase_prob * 100:.1f}%")
     
     for epoch in range(num_epochs):
         model.train()
@@ -120,7 +135,7 @@ def train_interpretable_classifier(model, paraphraser, train_loader, test_loader
             intermediates = []
             paraphrased_intermediates = []
             
-            # Process through each layer with paraphrasing
+            # Process through each layer with probabilistic paraphrasing
             for i, layer in enumerate(model.layers):
                 # Get layer output
                 current = layer(current)
@@ -129,9 +144,13 @@ def train_interpretable_classifier(model, paraphraser, train_loader, test_loader
                 # Store original layer output
                 orig_output = current.clone()
                 
-                # Apply paraphrasing
-                with torch.no_grad():
-                    paraphrased = paraphraser(current)
+                # Probabilistically apply paraphrasing
+                if np.random.random() < paraphrase_prob:
+                    with torch.no_grad():
+                        paraphrased = paraphraser(current)
+                else:
+                    paraphrased = current.clone()
+                    
                 paraphrased_intermediates.append(paraphrased)
                 
                 # Calculate metrics between original and paraphrased versions
@@ -163,11 +182,10 @@ def train_interpretable_classifier(model, paraphraser, train_loader, test_loader
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
 
-            # Visualize intermediates periodically
             if batch_idx % 500 == 0:
                 visualize_intermediates(images, intermediates, 
                                      paraphrased_intermediates, paraphraser,
-                                     epoch, batch_idx)
+                                     epoch, batch_idx, paraphrase_prob)
                 
                 # Log layer statistics
                 for i in range(len(model.layers)):
@@ -177,7 +195,7 @@ def train_interpretable_classifier(model, paraphraser, train_loader, test_loader
                     metrics_log['layer_metrics'][i]['mse'].append(avg_mse)
                     metrics_log['layer_metrics'][i]['cosine_sim'].append(avg_cos)
                     
-                print(f'\nLayer Statistics:')
+                print(f'\nLayer Statistics (Paraphrase Prob: {paraphrase_prob * 100:.1f}%):')
                 for i in range(len(model.layers)):
                     print(f'Layer {i+1}:')
                     print(f'  MSE: {metrics_log["layer_metrics"][i]["mse"][-1]:.4f}')
@@ -190,7 +208,7 @@ def train_interpretable_classifier(model, paraphraser, train_loader, test_loader
         metrics_log['train_acc'].append(train_acc)
         metrics_log['test_acc'].append(test_acc)
         
-        print(f'\nEpoch {epoch+1}:')
+        print(f'\nEpoch {epoch+1} (Paraphrase Prob: {paraphrase_prob * 100:.1f}%):')
         print(f'Train Acc: {train_acc:.2f}%, Test Acc: {test_acc:.2f}%')
         
         # Plot training progress
@@ -199,8 +217,8 @@ def train_interpretable_classifier(model, paraphraser, train_loader, test_loader
         # Save best model if specified
         if save_dir and test_acc > best_acc:
             best_acc = test_acc
-            torch.save(model.state_dict(), 
-                      os.path.join(save_dir, 'best_interpretable_classifier.pth'))
+            save_path = Path(save_dir) / f'interpretable_classifier_p{paraphrase_prob:.2f}.pth'
+            torch.save(model.state_dict(), save_path)
     
     return metrics_log
 
@@ -358,23 +376,62 @@ def plot_training_progress(metrics_log):
     plt.tight_layout()
     plt.show()
 
+def compare_training_results(metrics_logs):
+    """Compare and visualize results from different paraphrasing probabilities"""
+    plt.figure(figsize=(15, 10))
+    
+    # Plot test accuracy comparison
+    plt.subplot(2, 2, 1)
+    for metrics in metrics_logs:
+        prob = metrics['paraphrase_prob']
+        plt.plot(metrics['test_acc'], label=f'Prob={prob:.1f}')
+    plt.title('Test Accuracy Comparison')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy (%)')
+    plt.legend()
+    
+    # Plot average MSE per layer
+    plt.subplot(2, 2, 2)
+    for metrics in metrics_logs:
+        prob = metrics['paraphrase_prob']
+        layer_mses = []
+        for layer in range(len(metrics['layer_metrics'])):
+            avg_mse = np.mean(metrics['layer_metrics'][layer]['mse'])
+            layer_mses.append(avg_mse)
+        plt.plot(layer_mses, marker='o', label=f'Prob={prob:.1f}')
+    plt.title('Average MSE by Layer')
+    plt.xlabel('Layer')
+    plt.ylabel('MSE')
+    plt.legend()
+    
+    # Plot average cosine similarity per layer
+    plt.subplot(2, 2, 3)
+    for metrics in metrics_logs:
+        prob = metrics['paraphrase_prob']
+        layer_cos = []
+        for layer in range(len(metrics['layer_metrics'])):
+            avg_cos = np.mean(metrics['layer_metrics'][layer]['cosine_sim'])
+            layer_cos.append(avg_cos)
+        plt.plot(layer_cos, marker='o', label=f'Prob={prob:.1f}')
+    plt.title('Average Cosine Similarity by Layer')
+    plt.xlabel('Layer')
+    plt.ylabel('Cosine Similarity')
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.show()
+
 def main():
-    # Setup device
+    # Setup device and paths
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Using device: {device}')
     
-    # Setup paths
     root_dir = Path(__file__).resolve().parent
     data_dir = root_dir / 'data'
     models_dir = root_dir / 'models'
     models_dir.mkdir(exist_ok=True)
     
-    # Model paths
-    classifier_path = models_dir / 'initial_classifier.pth'
-    paraphraser_path = models_dir / 'paraphraser.pth'
-    interpretable_path = models_dir / 'interpretable_classifier.pth'
-    
-    # Data loading
+    # Setup data loaders
     transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize((0.1307,), (0.3081,))
@@ -390,16 +447,15 @@ def main():
     test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False, 
                             pin_memory=True, num_workers=4)
     
-    # Initialize models
+    # Load or train prerequisite models
     classifier = PretrainedClassifier()
     paraphraser = ImageParaphraser()
-    interpretable_classifier = InterpretableClassifier()
     
-    # Load or train initial classifier
+    # Load/train classifier
+    classifier_path = models_dir / 'initial_classifier.pth'
     if classifier_path.exists():
         print("Loading pretrained classifier...")
-        state_dict = torch.load(classifier_path, map_location=device)
-        classifier.load_state_dict(state_dict)
+        classifier.load_state_dict(torch.load(classifier_path, map_location=device))
     else:
         print("Training initial classifier...")
         classifier.to(device)
@@ -409,11 +465,11 @@ def main():
     classifier.to(device)
     classifier.eval()
     
-    # Load or train paraphraser
+    # Load/train paraphraser
+    paraphraser_path = models_dir / 'paraphraser.pth'
     if paraphraser_path.exists():
         print("Loading pretrained paraphraser...")
-        state_dict = torch.load(paraphraser_path, map_location=device)
-        paraphraser.load_state_dict(state_dict)
+        paraphraser.load_state_dict(torch.load(paraphraser_path, map_location=device))
     else:
         print("Training paraphraser...")
         paraphraser.to(device)
@@ -423,23 +479,34 @@ def main():
     paraphraser.to(device)
     paraphraser.eval()
     
-    # Train interpretable classifier
-    print("Training interpretable classifier...")
-    interpretable_classifier.to(device)
-    metrics_log = train_interpretable_classifier(
-        interpretable_classifier, 
-        paraphraser,
-        train_loader, 
-        test_loader, 
-        device=device,
-        save_dir=str(models_dir)
-    )
+    # Train interpretable classifiers with different paraphrasing probabilities
+    paraphrase_probs = [0.0, 0.5, 1.0]  # 0%, 50%, 100%
+    all_metrics = []
     
-    # Save final model and metrics
-    torch.save(interpretable_classifier.state_dict(), interpretable_path)
-    torch.save(metrics_log, models_dir / 'training_metrics.pth')
+    for prob in paraphrase_probs:
+        print(f"\nTraining classifier with {prob * 100:.1f}% paraphrasing probability")
+        model = InterpretableClassifier()
+        metrics = train_interpretable_classifier(
+            model, 
+            paraphraser,
+            train_loader, 
+            test_loader, 
+            paraphrase_prob=prob,
+            device=device,
+            save_dir=str(models_dir)
+        )
+        all_metrics.append(metrics)
+        
+        # Save final model and metrics
+        torch.save(model.state_dict(), 
+                  models_dir / f'interpretable_classifier_p{prob:.2f}.pth')
+        torch.save(metrics, 
+                  models_dir / f'training_metrics_p{prob:.2f}.pth')
     
-    print("\nTraining complete! Models saved in:", models_dir)
+    # Compare results
+    compare_training_results(all_metrics)
+    
+    print("\nTraining complete! Models and metrics saved in:", models_dir)
 
 if __name__ == "__main__":
     main()
