@@ -13,6 +13,7 @@ from torchvision.models import resnet18
 import os.path
 from tqdm import tqdm
 import os
+from pathlib import Path
 
 # Initial classifier model class
 class PretrainedClassifier(nn.Module):
@@ -106,11 +107,13 @@ def main():
     print(f'Using device: {device}')
     
     # Mount drive and setup save directory
-    #save_dir = mount_drive()
     save_dir = ''
 
     # Set data directory path (one level up)
-    data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
+    root_dir = Path(__file__).resolve().parent
+    data_dir = root_dir / 'data'
+    models_dir = root_dir / 'models'
+    #data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
     
     # Data loading with GPU support
     transform = transforms.Compose([
@@ -128,11 +131,11 @@ def main():
     test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False, 
                             pin_memory=True, num_workers=4)
     
-    # Initialize models
-    classifier = PretrainedClassifier()  # Move to device after loading/training
+    # Initialise classifier
+    classifier = PretrainedClassifier()  # Move to device after loading
     
-    # Load or train models
-    classifier_path = os.path.join(save_dir, 'initial_classifier.pth')
+    # Train model
+    classifier_path = os.path.join(models_dir, 'initial_classifier.pth')
     
     train_classifier(classifier, train_loader, test_loader, device)
     torch.save(classifier.state_dict(), classifier_path)
