@@ -91,14 +91,14 @@ class InterpretableClassifier(nn.Module):
 def train_interpretable_classifier(model, paraphraser, train_loader, test_loader, 
                                  paraphrase_prob=1.0, num_epochs=5, device='cuda', save_dir=None):
     """
-    Train the interpretable classifier with probabilistic paraphrasing at each layer
+    Train the interpretable classifier. Probabilistically paraphrases intermediate model states at each layer
     
     Args:
         model: The interpretable classifier model
         paraphraser: The trained paraphraser model
         train_loader: DataLoader for training data
         test_loader: DataLoader for test data
-        paraphrase_prob: Probability of applying paraphrasing at each layer (0.0 to 1.0)
+        paraphrase_prob: Probability of applying paraphrasing at each layer including input (0.0 to 1.0)
         num_epochs: Number of training epochs
         device: Device to train on
         save_dir: Directory to save models and metrics
