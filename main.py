@@ -6,8 +6,8 @@ import torchvision
 import torchvision.transforms as transforms
 
 # Import from project modules
-from initial_classifier.train_classifier import PretrainedClassifier
-from paraphrasing.training_paraphraser import ImageParaphraser
+from initial_classifier.training_initial_classifier import PretrainedClassifier
+from paraphraser.training_paraphraser import ImageParaphraser
 from interpretable.interpretable_classifier import train_interpretable_classifier, InterpretableClassifier
 
 def main():
