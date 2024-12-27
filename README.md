@@ -9,6 +9,8 @@ To train the interpretable classifier and see the intermediate model states (mai
 python main.py
 `
 
+## Imparting Biases
+
 Implicitly passing inductive biases to machine learning models is currently done with precisely organised model architectures or data pruning methods.
 
 There are sometimes precise models which allow effective, interpretable priors to be used by model to amplify performance. A good example of this is the translation equivariance of (some) convolutional architectures are their impact on image processing. However, it is often difficult or perhaps impossible to directly give inductive priors to models through their architectures.
