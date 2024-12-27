@@ -4,9 +4,9 @@
 ## Quick Start
 
 To train the interpretable classifier and see the intermediate model states (main project output):
-'''
+`
 python main.py
-'''
+`
 
 Implicitly passing inductive biases to machine learning models is currently done with precisely organised model architectures or data pruning methods.
 
