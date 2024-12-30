@@ -1,5 +1,7 @@
 '''
-Training a classifier architecture designed to produce intepretable intermediate states/
+A basic archiecture.
+
+Training a classifier architecture designed to produce intepretable intermediate states.
 These intermediate states are all, until the final logits, of the same shape of the original MNIST inputs.
 This harms classification performance (concerningly pointing to a negative alignment tax).
 
@@ -25,9 +27,11 @@ from tqdm import tqdm
 import os
 import sys
 from pathlib import Path
+from typing import List, Tuple
+import json
 
 # Add parent directory to Python path to enable imports from sibling directories
-project_root = Path(__file__).resolve().parent
+project_root = Path(__file__).resolve().parent.parent  # Going to the true parent
 sys.path.append(str(project_root))
 
 # Import from other modules
@@ -35,51 +39,61 @@ from initial_classifier.training_initial_classifier import train_classifier, Pre
 from paraphraser.training_paraphraser import train_paraphraser, ImageParaphraser
 
 class InterpretableClassifier(nn.Module):
-    """Classifier that outputs interpretable intermediate representations"""
-    def __init__(self, num_classes=10):
+    """Classifier with customizable interpretable intermediate representations"""
+    def __init__(self, layer_configs: List[Tuple[int, int]], num_classes: int = 10):
+        """
+        Args:
+            layer_configs: List of tuples (in_channels, out_channels) for each layer
+            num_classes: Number of output classes
+        """
         super().__init__()
-        self.layers = nn.ModuleList([
-            # Layer 1: Edge detection and basic feature extraction
-            nn.Sequential(
-                nn.Conv2d(1, 32, kernel_size=3, padding=1),
-                nn.BatchNorm2d(32),
-                nn.ReLU(),
-                nn.Conv2d(32, 1, kernel_size=3, padding=1),
-                nn.Sigmoid()
-            ),
-            # Layer 2: Pattern recognition
-            nn.Sequential(
-                nn.Conv2d(1, 64, kernel_size=3, padding=1),
-                nn.BatchNorm2d(64),
-                nn.ReLU(),
-                nn.Conv2d(64, 1, kernel_size=3, padding=1),
-                nn.Sigmoid()
-            ),
-            # Layer 3: Higher-level feature extraction
-            nn.Sequential(
-                nn.Conv2d(1, 128, kernel_size=3, padding=1),
-                nn.BatchNorm2d(128),
-                nn.ReLU(),
-                nn.Conv2d(128, 1, kernel_size=3, padding=1),
-                nn.Sigmoid()
-            )
-        ])
+        self.layers = nn.ModuleList()
+        self.residual_projections = nn.ModuleList()
         
-        # Final classification layer
+        for in_channels, out_channels in layer_configs:
+            # Main convolutional block
+            layer = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels*2, kernel_size=3, padding=1),
+                nn.BatchNorm2d(out_channels*2),
+                nn.ReLU(),
+                nn.Conv2d(out_channels*2, out_channels, kernel_size=3, padding=1),
+                nn.BatchNorm2d(out_channels),
+                nn.ReLU()
+            )
+            self.layers.append(layer)
+            
+            # Residual projection if needed
+            if in_channels != out_channels:
+                proj = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+            else:
+                proj = nn.Identity()
+            self.residual_projections.append(proj)
+        
+        # Calculate total flattened size for final layer
+        final_channels = layer_configs[-1][1]
         self.classifier = nn.Sequential(
+            nn.AdaptiveAvgPool2d((7, 7)),  # Adaptive pooling to fixed size
             nn.Flatten(),
-            nn.Linear(28 * 28, 256),
+            nn.Linear(final_channels * 7 * 7, 512),
             nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(256, num_classes)
+            nn.Dropout(0.3),
+            nn.Linear(512, num_classes)
         )
-
+        
+    def get_param_count(self):
+        """Return total number of parameters"""
+        return sum(p.numel() for p in self.parameters())
+        
     def forward(self, x, return_intermediates=False):
         intermediates = []
         current = x
         
-        for layer in self.layers:
-            current = layer(current)
+        for layer, proj in zip(self.layers, self.residual_projections):
+            # Apply main layer
+            layer_out = layer(current)
+            # Add residual connection
+            residual = proj(current)
+            current = layer_out + residual
             intermediates.append(current)
         
         logits = self.classifier(current)
@@ -88,180 +102,161 @@ class InterpretableClassifier(nn.Module):
             return logits, intermediates
         return logits
     
-def train_interpretable_classifier(model, paraphraser, train_loader, test_loader, 
-                                 paraphrase_prob=1.0, num_epochs=5, device='cuda', save_dir=None):
+def train_interpretable_classifier(
+    model, paraphraser, train_loader, test_loader,
+    paraphrase_prob=1.0, num_epochs=5, device='cuda',
+    exp_dir=None, reg_weight=0.01
+):
     """
-    Train the interpretable classifier. Probabilistically paraphrases input and intermediate model states.
+    Train the interpretable classifier with support for probability schedules.
+    
+    Args:
+        model: The model to train
+        paraphraser: The paraphraser model
+        train_loader: Training data loader
+        test_loader: Test data loader
+        paraphrase_prob: float or list. If float, used as constant probability.
+                        If list, must have length num_epochs
+        num_epochs: Number of training epochs
+        device: Device to train on
+        exp_dir: Directory to save results
+        reg_weight: Weight for regularization loss
+        
+    Returns:
+        dict: Training metrics
     """
-    model = model.to(device)
-    paraphraser = paraphraser.to(device)
-    criterion = nn.CrossEntropyLoss().to(device)
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
-    
-    metrics_log = {
-        'paraphrase_prob': paraphrase_prob,
-        'train_acc': [],
-        'train_loss': [],
-        'test_acc': [],
-        'batch_metrics': {
-            'loss': [],
-            'acc': []
-        },
-        'layer_metrics': {i: {'mse': [], 'cosine_sim': [], 'was_paraphrased': []} 
-                         for i in range(len(model.layers) + 1)}  # +1 for input layer
-    }
-    
-    best_acc = 0.0
-    
-    print(f"\nTraining with paraphrase probability: {paraphrase_prob * 100:.1f}%")
-    
-    for epoch in range(num_epochs):
-        model.train()
-        epoch_loss = 0.0
-        correct = 0
-        total = 0
-        batch_count = 0
-        layer_diffs = [[] for _ in range(len(model.layers) + 1)]  # +1 for input layer
-
-        for batch_idx, (images, labels) in enumerate(tqdm(train_loader)):
-            images, labels = images.to(device), labels.to(device)
-            optimizer.zero_grad()
-            
-            # Handle input paraphrasing
-            was_input_paraphrased = np.random.random() < paraphrase_prob
-            if was_input_paraphrased:
-                with torch.no_grad():
-                    current = paraphraser(images)
-                # Calculate metrics between original and paraphrased input
-                mse = F.mse_loss(images, current).item()
-                cosine_sim = F.cosine_similarity(images.view(images.size(0), -1),
-                                               current.view(current.size(0), -1),
-                                               dim=1).mean().item()
+    def _validate_prob_schedule(prob_schedule, num_epochs):
+        """Validate and normalize probability schedule"""
+        if isinstance(prob_schedule, (int, float)):
+            return [float(prob_schedule)] * num_epochs
+        
+        if isinstance(prob_schedule, list):
+            if len(prob_schedule) == num_epochs:
+                return [float(p) for p in prob_schedule]
+            elif len(prob_schedule) == 1:
+                return [float(prob_schedule[0])] * num_epochs
             else:
-                current = images
-                mse = 0.0  # No paraphrasing occurred
-                cosine_sim = 1.0  # Identity mapping
-            
-            # Store input layer metrics
-            layer_diffs[0].append({
-                'mse': mse, 
-                'cosine_sim': cosine_sim,
-                'was_paraphrased': was_input_paraphrased
-            })
-            
-            # Forward pass tracking intermediates
-            intermediates = []
-            paraphrased_intermediates = []
-            layer_originals = []  # Store original outputs for visualization
-            
-            # Process through each layer with probabilistic paraphrasing
-            for i, layer in enumerate(model.layers, 1):  # Start from 1 since 0 is input
-                # Get layer output
-                current = layer(current)
-                layer_originals.append(current.clone())  # Store original layer output
-                
-                # Probabilistically apply paraphrasing
-                was_paraphrased = np.random.random() < paraphrase_prob
-                if was_paraphrased:
-                    with torch.no_grad():
-                        paraphrased = paraphraser(current)
-                    # Calculate metrics only if paraphrasing occurred
-                    mse = F.mse_loss(current, paraphrased).item()
-                    cosine_sim = F.cosine_similarity(current.view(current.size(0), -1),
-                                                   paraphrased.view(paraphrased.size(0), -1),
-                                                   dim=1).mean().item()
-                else:
-                    paraphrased = current
-                    mse = 0.0  # No paraphrasing occurred
-                    cosine_sim = 1.0  # Identity mapping
-                
-                intermediates.append(current)
-                paraphrased_intermediates.append(paraphrased)
-                
-                layer_diffs[i].append({
-                    'mse': mse, 
-                    'cosine_sim': cosine_sim,
-                    'was_paraphrased': was_paraphrased
-                })
-                
-                current = paraphrased
-            
-            # Final classification
-            logits = model.classifier(current)
-            
-            # Calculate loss
-            class_loss = criterion(logits, labels)
-            reg_loss = sum(F.mse_loss(inter, para) 
-                          for inter, para in zip(intermediates, paraphrased_intermediates))
-            
-            total_loss = class_loss + 0.1 * reg_loss
-            total_loss.backward()
-            optimizer.step()
-
-            # Update metrics
-            batch_loss = total_loss.item()
-            epoch_loss += batch_loss
-            _, predicted = torch.max(logits.data, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-            batch_count += 1
-
-            # Store batch-level metrics
-            metrics_log['batch_metrics']['loss'].append(batch_loss)
-            metrics_log['batch_metrics']['acc'].append(100 * (predicted == labels).sum().item() / labels.size(0))
-
-            if batch_idx % 100 == 0:  # Reduced frequency for more meaningful plots
-                visualize_intermediates(
-                    original_input=images,
-                    paraphrased_input=current if was_input_paraphrased else None,
-                    layer_originals=layer_originals,
-                    layer_paraphrased=paraphrased_intermediates,
-                    layer_diffs=layer_diffs,
-                    epoch=epoch,
-                    batch_idx=batch_idx
+                raise ValueError(
+                    f"Probability schedule length ({len(prob_schedule)}) "
+                    f"must match num_epochs ({num_epochs}) or be length 1"
                 )
-                
-                # Log layer statistics
-                for i in range(len(model.layers) + 1):
-                    layer_metrics = layer_diffs[i][-100:]  # Use last 100 batches
-                    metrics_log['layer_metrics'][i]['mse'].append(
-                        np.mean([m['mse'] for m in layer_metrics]))
-                    metrics_log['layer_metrics'][i]['cosine_sim'].append(
-                        np.mean([m['cosine_sim'] for m in layer_metrics]))
-                    metrics_log['layer_metrics'][i]['was_paraphrased'].append(
-                        np.mean([m['was_paraphrased'] for m in layer_metrics]))
-                    
-                print(f'\nLayer Statistics (Paraphrase Prob: {paraphrase_prob * 100:.1f}%):')
-                for i in range(len(model.layers) + 1):
-                    layer_name = "Input" if i == 0 else f"Layer {i}"
-                    paraphrase_rate = np.mean([m['was_paraphrased'] for m in layer_diffs[i][-100:]])
-                    print(f'{layer_name}:')
-                    print(f'  MSE: {metrics_log["layer_metrics"][i]["mse"][-1]:.4f}')
-                    print(f'  Cosine Similarity: {metrics_log["layer_metrics"][i]["cosine_sim"][-1]:.4f}')
-                    print(f'  Actual Paraphrase Rate: {paraphrase_rate * 100:.1f}%')
+        
+        raise ValueError(
+            f"Invalid probability schedule type: {type(prob_schedule)}"
+        )
 
-        # Epoch-level metrics
-        train_acc = 100 * correct / total
-        train_loss = epoch_loss / batch_count
-        test_acc = evaluate_model(model, test_loader, device)
-        
-        metrics_log['train_acc'].append(train_acc)
-        metrics_log['train_loss'].append(train_loss)
-        metrics_log['test_acc'].append(test_acc)
-        
-        print(f'\nEpoch {epoch+1} (Paraphrase Prob: {paraphrase_prob * 100:.1f}%):')
-        print(f'Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, Test Acc: {test_acc:.2f}%')
-        
-        # Plot training progress
-        plot_training_progress(metrics_log)
-        
-        # Save best model if specified
-        if save_dir and test_acc > best_acc:
-            best_acc = test_acc
-            save_path = Path(save_dir) / f'interpretable_classifier_p{paraphrase_prob:.2f}.pth'
-            torch.save(model.state_dict(), save_path)
+    # Validate and normalize probability schedule
+    if isinstance(paraphrase_prob, list) and len(paraphrase_prob) > 0 and isinstance(paraphrase_prob[0], list):
+        # Multiple probability schedules provided
+        prob_schedules = [_validate_prob_schedule(schedule, num_epochs) 
+                         for schedule in paraphrase_prob]
+        num_runs = len(prob_schedules) # should always be 1
+    else:
+        # Single probability or schedule provided
+        prob_schedules = [_validate_prob_schedule(paraphrase_prob, num_epochs)]
+        num_runs = 1
+
+    all_metrics = []
     
-    return metrics_log
+    for run_idx, prob_schedule in enumerate(prob_schedules): # should only even be one passed
+        if len(prob_schedule) < 100:
+            print(f"Probability schedule: {prob_schedule}")
+        
+        model = model.to(device)
+        paraphraser = paraphraser.to(device)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.01)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='max', factor=0.5, patience=2
+        )
+        
+        metrics_log = {
+            'paraphrase_schedule': prob_schedule,
+            'train_acc': [],
+            'train_loss': [],
+            'test_acc': [],
+            'layer_metrics': {}
+        }
+        
+        best_acc = 0.0
+        
+        for epoch in range(num_epochs):
+            current_prob = prob_schedule[epoch]
+            model.train()
+            epoch_loss = 0.0
+            correct = 0
+            total = 0
+            
+            print(f"\nEpoch {epoch + 1}/{num_epochs}, "
+                  f"Paraphrase probability: {current_prob:.3f}")
+            
+            for batch_idx, (images, labels) in enumerate(train_loader):
+                images, labels = images.to(device), labels.to(device)
+                optimizer.zero_grad()
+                
+                logits, intermediates = model(images, return_intermediates=True)
+                
+                # Apply current epoch's paraphrase probability
+                paraphrased = []
+                for state in intermediates:
+                    if torch.rand(1).item() < current_prob:
+                        with torch.no_grad():
+                            para_state = paraphraser(state)
+                        paraphrased.append(para_state)
+                    else:
+                        paraphrased.append(state)
+                
+                class_loss = criterion(logits, labels)
+                reg_loss = sum(F.mse_loss(inter, para) 
+                             for inter, para in zip(intermediates, paraphrased))
+                
+                total_loss = class_loss + reg_weight * reg_loss
+                total_loss.backward()
+                
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                
+                epoch_loss += total_loss.item()
+                _, predicted = torch.max(logits.data, 1)
+                total += labels.size(0)
+                correct += (predicted == labels).sum().item()
+            
+            train_acc = 100 * correct / total
+            train_loss = epoch_loss / len(train_loader)
+            test_acc = evaluate_model(model, test_loader, device)
+            
+            scheduler.step(test_acc)
+            
+            metrics_log['train_acc'].append(train_acc)
+            metrics_log['train_loss'].append(train_loss)
+            metrics_log['test_acc'].append(test_acc)
+            
+            if exp_dir:
+                run_dir = exp_dir / f"run_{run_idx}"
+                run_dir.mkdir(exist_ok=True)
+                save_training_visualizations(metrics_log, run_dir, epoch)
+            
+            if test_acc > best_acc and exp_dir:
+                best_acc = test_acc
+                if num_runs > 1:
+                    save_path = exp_dir / f'run_{run_idx}'
+                    save_path.mkdir(exist_ok=True)
+                    model_path = save_path / 'best_model.pth'
+                    metrics_path = save_path / 'best_metrics.pth'
+                else:
+                    model_path = exp_dir / 'best_model.pth'
+                    metrics_path = exp_dir / 'best_metrics.pth'
+                    
+                torch.save(model.state_dict(), model_path)
+                torch.save(metrics_log, metrics_path)
+            
+            print(f'Epoch {epoch+1}: Train Loss={train_loss:.4f}, '
+                  f'Train Acc={train_acc:.2f}%, Test Acc={test_acc:.2f}%')
+        
+        all_metrics.append(metrics_log)
+    
+    return all_metrics if num_runs > 1 else all_metrics[0]
+
 
 # visualise the paraphraser iimages with their original counterparts
 def visualize_paraphrasing(paraphraser, train_loader, device, num_samples=10):
@@ -453,16 +448,53 @@ def compare_training_results(metrics_logs):
     plt.tight_layout()
     plt.show()
 
+def save_training_visualizations(metrics_log, exp_dir: Path, epoch: int):
+    """Save training visualizations to the experiment directory"""
+    fig = plt.figure(figsize=(20, 10))
+    
+    # Plot accuracies
+    plt.subplot(2, 2, 1)
+    plt.plot(metrics_log['train_acc'], label='Train')
+    plt.plot(metrics_log['test_acc'], label='Test')
+    plt.title('Classification Accuracy')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy (%)')
+    plt.legend()
+    
+    # Plot losses
+    plt.subplot(2, 2, 2)
+    plt.plot(metrics_log['train_loss'], label='Train Loss')
+    plt.title('Training Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    
+    # Save plot
+    plt.tight_layout()
+    plt.savefig(exp_dir / f"training_progress_epoch_{epoch}.png")
+    plt.close()
+
+
 def main():
     # Setup device and paths
+
+    # Setup device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Using device: {device}')
     
-    root_dir = Path(__file__).resolve().parent
-    data_dir = root_dir / 'data'
-    models_dir = root_dir / 'models'
-    models_dir.mkdir(exist_ok=True)
+    # Setup paths
+    data_dir = project_root / 'data'
+    models_dir = project_root / 'models'
+    #models_dir.mkdir(exist_ok=True) # if this directory is not present, an error should be created clearly
     
+    # Define model architecture configurations
+    layer_configs = [
+        # (in_channels, out_channels)
+        (1, 32),    # First layer expands channels
+        (32, 64),   # Increase feature complexity
+        (64, 32),   # Gradually reduce channels
+        (32, 16)    # Final interpretable representation
+    ]
+
     # Setup data loaders
     transform = transforms.Compose([
         transforms.ToTensor(),
@@ -478,67 +510,104 @@ def main():
                             pin_memory=True, num_workers=4)
     test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False, 
                             pin_memory=True, num_workers=4)
-    
-    # Load or train prerequisite models
+        
+    # Load prerequisite models
     classifier = PretrainedClassifier()
     paraphraser = ImageParaphraser()
     
-    # Load/train classifier
+    # Load initial classifier
     classifier_path = models_dir / 'initial_classifier.pth'
-    if classifier_path.exists():
-        print("Loading pretrained classifier...")
-        classifier.load_state_dict(torch.load(classifier_path, map_location=device))
-    else:
-        print("Training initial classifier...")
-        classifier.to(device)
-        train_classifier(classifier, train_loader, test_loader, device)
-        torch.save(classifier.state_dict(), classifier_path)
-    
+    if not classifier_path.exists():
+        raise FileNotFoundError(
+            "Initial classifier not found! Please run initial_classifier/train_classifier.py first."
+        )
+    print("Loading pretrained classifier...")
+    classifier.load_state_dict(torch.load(classifier_path, map_location=device, weights_only=True))
     classifier.to(device)
     classifier.eval()
     
-    # Load/train paraphraser
+    # Load paraphraser
     paraphraser_path = models_dir / 'paraphraser.pth'
-    if paraphraser_path.exists():
-        print("Loading pretrained paraphraser...")
-        paraphraser.load_state_dict(torch.load(paraphraser_path, map_location=device))
-    else:
-        print("Training paraphraser...")
-        paraphraser.to(device)
-        train_paraphraser(paraphraser, classifier, train_loader, device)
-        torch.save(paraphraser.state_dict(), paraphraser_path)
-    
+    if not paraphraser_path.exists():
+        raise FileNotFoundError(
+            "Paraphraser not found! Please run paraphrasing/training_paraphraser.py first."
+        )
+    print("Loading pretrained paraphraser...")
+    paraphraser.load_state_dict(torch.load(paraphraser_path, map_location=device, weights_only=True))
     paraphraser.to(device)
     paraphraser.eval()
     
-    # Train interpretable classifiers with different paraphrasing probabilities
-    paraphrase_probs = [0.0, 0.5, 1.0]  # 0%, 50%, 100%
-    all_metrics = []
+    # Define training schedules
+    num_epochs = 10  # Define number of epochs. Currently constant across experiments
     
-    for prob in paraphrase_probs:
-        print(f"\nTraining classifier with {prob * 100:.1f}% paraphrasing probability")
-        model = InterpretableClassifier()
+    # Define different probability schedules to test
+    paraphrase_schedules = [
+        # Constant probabilities
+        0.0,    # No paraphrasing
+        #0.5,    # 50% paraphrasing
+        #1.0,    # 100% paraphrasing
+        
+        # Linear increase schedules
+        [i * 0.2 / (num_epochs - 1) for i in range(num_epochs)],  # 0.0 to 0.2
+        [i * 0.5 / (num_epochs - 1) for i in range(num_epochs)],  # 0.0 to 0.5
+        
+        # Custom schedules
+        [0.0] * 3 + [0.2] * 7,  # No paraphrasing for 3 epochs, then 20%
+        #[0.1] * 5 + [0.3] * 5,  # 10% for 5 epochs, then 30%
+    ]
+    
+    print("\nTraining interpretable classifiers with different paraphrasing schedules...")
+    
+    # Create experiment root directory with layer config name
+    exp_name = f"layers_{len(layer_configs)}_channels_" + "_".join(str(cfg[1]) for cfg in layer_configs)
+    exp_root = models_dir / exp_name
+    exp_root.mkdir(exist_ok=True) # this will override existing files in the current setup
+    
+    # Save layer configuration
+    with open(exp_root / "architecture_config.txt", "w") as f:
+        f.write("Layer configurations:\n")
+        for i, (in_ch, out_ch) in enumerate(layer_configs):
+            f.write(f"Layer {i}: {in_ch} -> {out_ch} channels\n")
+    
+    for schedule_idx, schedule in enumerate(paraphrase_schedules):
+        print(f"Running schedule {schedule_idx} / {len(paraphrase_schedules)}") # allows tracking of progress
+        # Create schedule-specific directory
+        if isinstance(schedule, (int, float)):
+            schedule_name = f"constant_{schedule:.2f}"
+            schedule_desc = f"{schedule*100:.0f}% constant paraphrasing"
+        else:
+            schedule_name = f"schedule_{schedule_idx}"
+            schedule_desc = f"Custom schedule {schedule_idx}: {schedule}"
+        
+        schedule_dir = exp_root / schedule_name
+        schedule_dir.mkdir(exist_ok=True)
+        
+        print(f"\nTraining classifier with {schedule_desc}")
+        model = InterpretableClassifier(layer_configs)
+        print(f"\nTotal interpretable classifier parameter number is {model.get_param_count()}")
+        
+        # Save schedule configuration
+        with open(schedule_dir / "schedule_config.txt", "w") as f:
+            f.write(f"Schedule description: {schedule_desc}\n")
+            f.write(f"Schedule values: {schedule}\n")
+            f.write(f"Number of epochs: {num_epochs}\n")
+        
         metrics = train_interpretable_classifier(
-            model, 
-            paraphraser,
-            train_loader, 
-            test_loader, 
-            paraphrase_prob=prob,
+            model=model,
+            paraphraser=paraphraser,
+            train_loader=train_loader,
+            test_loader=test_loader,
+            paraphrase_prob=schedule,
             device=device,
-            save_dir=str(models_dir)
+            num_epochs=num_epochs,
+            exp_dir=schedule_dir
         )
-        all_metrics.append(metrics)
         
         # Save final model and metrics
-        torch.save(model.state_dict(), 
-                  models_dir / f'interpretable_classifier_p{prob:.2f}.pth')
-        torch.save(metrics, 
-                  models_dir / f'training_metrics_p{prob:.2f}.pth')
+        torch.save(model.state_dict(), schedule_dir / 'final_model.pth')
+        torch.save(metrics, schedule_dir / 'training_metrics.pth')
     
-    # Compare results
-    compare_training_results(all_metrics)
-    
-    print("\nTraining complete! Models and metrics saved in:", models_dir)
+    print("\nTraining complete! Models and metrics saved in:", exp_root)
 
 if __name__ == "__main__":
     main()
