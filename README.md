@@ -23,7 +23,7 @@ A paraphrasing model is defined to be a model which converts data to a significa
 
 By creating this transformation, we have the potential to make a model significantly more generalisable. By training on a combination of the original and the paraphrased data, we make a model which shares our approach to irrelevant details. The use of data augmentation in some standard methods have been very well chronicled in papers such as https://arxiv.org/pdf/2204.08610.
 
-So, the use of a paraphraser on training data could be expected to make a model's activations more interpretable by reducing the use of steganography (where uninterpretable thoughts are hidden in plain sight unbeknownst to the human operator). This steganography has the potential to hide unwanted associations from human oversight. For an introduction to this issue in language modelling, see https://www.lesswrong.com/posts/yDcMDJeSck7SuBs24/steganography-in-chain-of-thought-reasoning.
+So, the use of a paraphraser on training data could be expected to make a model's activations more interpretable by reducing the use of steganography (where uninterpretable thoughts are hidden in plain sight unbeknownst to the human operator). This steganography has the potential to hide unwanted associations from human oversight. For an introduction to this issue in language modelling, see https://www.lesswrong.com/posts/yDcMDJeSck7SuBs24/steganography-in-chain-of-thought-reasoning. For more information about how steganography might be reduced in advanced language models, see https://www.lesswrong.com/posts/9Fdd9N7Escg3tcymb/preventing-language-models-from-hiding-their-reasoning.
 
 ## Designing the Paraphraser
 
