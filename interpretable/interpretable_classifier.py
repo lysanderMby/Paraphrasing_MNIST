@@ -470,7 +470,7 @@ def save_training_visualizations(metrics_log, exp_dir: Path, epoch: int):
     
     # Save plot
     plt.tight_layout()
-    plt.savefig(exp_dir / f"training_progress_epoch_{epoch}.png")
+    plt.savefig(exp_dir / f"training_progress_epoch_{epoch+1}.png") # epoch counting from zero
     plt.close()
 
 
