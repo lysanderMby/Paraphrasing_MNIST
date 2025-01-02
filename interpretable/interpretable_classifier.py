@@ -29,6 +29,7 @@ import sys
 from pathlib import Path
 from typing import List, Tuple
 import json
+import re
 
 # Add parent directory to Python path to enable imports from sibling directories
 project_root = Path(__file__).resolve().parent.parent  # Going to the true parent
@@ -101,6 +102,34 @@ class InterpretableClassifier(nn.Module):
         if return_intermediates:
             return logits, intermediates
         return logits
+
+def paraphrase_multichannel(paraphraser, state):
+    """
+    Paraphrase a multi-channel state by processing each channel independently
+    
+    Args:
+        paraphraser: Single-channel paraphraser model
+        state: Multi-channel state tensor [B, C, H, W] (B=batch size, C=channels, H=height, W=width)
+        
+    Returns:
+        Paraphrased multi-channel state tensor [B, C, H, W]
+    """
+    batch_size, num_channels, height, width = state.shape
+    
+    # Process each channel independently
+    paraphrased_channels = []
+    for c in range(num_channels):
+        # Extract single channel [B, 1, H, W]
+        channel = state[:, c:c+1, :, :]
+        
+        # Paraphrase this channel
+        paraphrased_channel = paraphraser(channel)
+        
+        paraphrased_channels.append(paraphrased_channel)
+    
+    # Concatenate channels back together
+    return torch.cat(paraphrased_channels, dim=1)
+
     
 def train_interpretable_classifier(
     model, paraphraser, train_loader, test_loader,
@@ -201,7 +230,7 @@ def train_interpretable_classifier(
                 for state in intermediates:
                     if torch.rand(1).item() < current_prob:
                         with torch.no_grad():
-                            para_state = paraphraser(state)
+                            para_state = paraphrase_multichannel(paraphraser, state)
                         paraphrased.append(para_state)
                     else:
                         paraphrased.append(state)
@@ -473,6 +502,39 @@ def save_training_visualizations(metrics_log, exp_dir: Path, epoch: int):
     plt.savefig(exp_dir / f"training_progress_epoch_{epoch+1}.png") # epoch counting from zero
     plt.close()
 
+def create_versioned_directory(base_path: Path, folder_name: str) -> Path:
+    """
+    Creates a versioned directory. If the directory already exists,
+    adds a version number (v1, v2, etc.) to create a unique path.
+    """
+    # First try without version number
+    target_path = base_path / folder_name
+    if not target_path.exists():
+        target_path.mkdir(parents=True, exist_ok=False)
+        return target_path
+        
+    # Find existing versions
+    version_pattern = re.compile(rf"^{re.escape(folder_name)}_v(\d+)$")
+    existing_versions = []
+    
+    for path in base_path.iterdir():
+        if path.is_dir():
+            match = version_pattern.match(path.name)
+            if match:
+                existing_versions.append(int(match.group(1)))
+    
+    # If no versions exist yet, start with v1
+    if not existing_versions:
+        new_version = 1
+    else:
+        new_version = max(existing_versions) + 1
+        
+    # Create new versioned directory
+    versioned_path = base_path / f"{folder_name}_v{new_version}"
+    versioned_path.mkdir(parents=True, exist_ok=False)
+    
+    return versioned_path
+
 
 def main():
     # Setup device and paths
@@ -543,12 +605,12 @@ def main():
     # Define different probability schedules to test
     paraphrase_schedules = [
         # Constant probabilities
-        0.0,    # No paraphrasing
+        #0.0,    # No paraphrasing
         #0.5,    # 50% paraphrasing
         #1.0,    # 100% paraphrasing
         
         # Linear increase schedules
-        [i * 0.2 / (num_epochs - 1) for i in range(num_epochs)],  # 0.0 to 0.2
+        [(i+1) * 0.2 / (num_epochs - 1) for i in range(num_epochs)],  # 0.0 to 0.2
         [i * 0.5 / (num_epochs - 1) for i in range(num_epochs)],  # 0.0 to 0.5
         
         # Custom schedules
@@ -560,8 +622,7 @@ def main():
     
     # Create experiment root directory with layer config name
     exp_name = f"layers_{len(layer_configs)}_channels_" + "_".join(str(cfg[1]) for cfg in layer_configs)
-    exp_root = models_dir / exp_name
-    exp_root.mkdir(exist_ok=True) # this will override existing files in the current setup
+    exp_root = create_versioned_directory(models_dir, exp_name)
     
     # Save layer configuration
     with open(exp_root / "architecture_config.txt", "w") as f:
