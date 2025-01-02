@@ -1,0 +1,5 @@
+Layer configurations:
+Layer 0: 1 -> 32 channels
+Layer 1: 32 -> 64 channels
+Layer 2: 64 -> 32 channels
+Layer 3: 32 -> 16 channels

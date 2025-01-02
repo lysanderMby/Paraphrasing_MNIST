@@ -1,0 +1,3 @@
+Schedule description: 0% constant paraphrasing
+Schedule values: 0.0
+Number of epochs: 10
