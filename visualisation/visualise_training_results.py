@@ -89,6 +89,10 @@ def plot_best_model_analysis(exp_dir: Path):
     best_acc = 0
     best_schedule = None
     best_metrics = None
+    best_run = None  # Not needed since we don't have run directories
+    
+    print("\n  Best Model Analysis:")
+    print("  -------------------")
     
     for schedule_dir in schedules:
         try:
@@ -112,10 +116,12 @@ def plot_best_model_analysis(exp_dir: Path):
             continue
     
     if best_metrics is None:
-        print("  WARNING: No valid metrics found in any run directory")
+        print("  WARNING: No valid metrics found in any schedule directory")
         return
     
-    print(f"  Creating visualization for best model (acc: {best_acc:.2f}%)")
+    print(f"\n  Creating visualization for best model:")
+    print(f"  Best schedule: {best_schedule.name}")
+    print(f"  Peak accuracy: {best_acc:.2f}%")
     
     # Create visualization for best model
     fig, axes = plt.subplots(2, 2, figsize=(15, 12))
@@ -147,7 +153,6 @@ def plot_best_model_analysis(exp_dir: Path):
     # Add summary statistics
     summary_text = (
         f"Best Schedule: {best_schedule.name}\n"
-        f"Best Run: {best_run.name}\n"
         f"Peak Accuracy: {best_acc:.2f}%\n"
         f"Final Accuracy: {best_metrics['test_acc'][-1]:.2f}%\n"
         f"Convergence Epoch: {np.argmax(best_metrics['test_acc'])+1}"
@@ -162,6 +167,8 @@ def plot_best_model_analysis(exp_dir: Path):
     plt.tight_layout()
     plt.savefig(exp_dir / 'best_model_analysis.png')
     plt.close()
+    
+    print("  ✓ Best model analysis plot saved")
 
 def main():
     # Get absolute path and print current working directory
