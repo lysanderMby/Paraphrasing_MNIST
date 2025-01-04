@@ -30,6 +30,8 @@ from pathlib import Path
 from typing import List, Tuple
 import json
 import re
+import time
+from datetime import datetime, timedelta
 
 # Add parent directory to Python path to enable imports from sibling directories
 project_root = Path(__file__).resolve().parent.parent  # Going to the true parent
@@ -209,17 +211,29 @@ def train_interpretable_classifier(
         
         best_acc = 0.0
         
+        start_time = time.time()
+        print(f"\nStarting training at {datetime.now().strftime('%H:%M:%S')}")
+        
         for epoch in range(num_epochs):
-            current_prob = prob_schedule[epoch]
+            epoch_start = time.time()
             model.train()
+            
+            # Get current paraphrase probability
+            current_prob = prob_schedule[epoch] if isinstance(prob_schedule, list) else prob_schedule
+            print(f"\nEpoch {epoch + 1}/{num_epochs}, "
+                  f"Paraphrase probability: {current_prob:.3f}")
+            print("")  # Clean line for progress bar
+            
             epoch_loss = 0.0
             correct = 0
             total = 0
             
-            print(f"\nEpoch {epoch + 1}/{num_epochs}, "
-                  f"Paraphrase probability: {current_prob:.3f}")
-            
-            for batch_idx, (images, labels) in enumerate(train_loader):
+            # Training loop with progress bar
+            for batch_idx, (images, labels) in tqdm(enumerate(train_loader), 
+                                                  desc=f"Training", 
+                                                  total=len(train_loader),
+                                                  position=0,
+                                                  leave=True):
                 images, labels = images.to(device), labels.to(device)
                 optimizer.zero_grad()
                 
@@ -252,7 +266,23 @@ def train_interpretable_classifier(
             
             train_acc = 100 * correct / total
             train_loss = epoch_loss / len(train_loader)
-            test_acc = evaluate_model(model, test_loader, device)
+            
+            # Test without progress bar
+            model.eval()
+            test_loss = 0
+            correct = 0
+            print("\nEvaluating...", end=' ')
+            with torch.no_grad():
+                for images, labels in test_loader:
+                    images = images.to(device)
+                    labels = labels.to(device)
+                    
+                    outputs = model(images)
+                    test_loss += criterion(outputs, labels).item()
+                    _, predicted = torch.max(outputs.data, 1)
+                    correct += (predicted == labels).sum().item()
+            
+            test_acc = 100 * correct / len(test_loader.dataset)
             
             scheduler.step(test_acc)
             
@@ -263,7 +293,47 @@ def train_interpretable_classifier(
             if exp_dir:
                 run_dir = exp_dir / f"run_{run_idx}"
                 run_dir.mkdir(exist_ok=True)
+                
+                # Save training progress plots
                 save_training_visualizations(metrics_log, run_dir, epoch)
+                
+                # Save intermediate states visualization
+                intermediates_dir = run_dir / 'intermediate_states' / f'epoch_{epoch+1}'
+                images, _ = next(iter(train_loader))
+                images = images.to(device)
+                
+                with torch.no_grad():
+                    logits, intermediates = model(images, return_intermediates=True)
+                    # Generate paraphrased versions and track which were paraphrased
+                    paraphrased_states = []
+                    layer_diffs = [{'was_paraphrased': False}]  # Initial state for input
+                    
+                    for state in intermediates:
+                        was_paraphrased = torch.rand(1).item() < current_prob
+                        if was_paraphrased:
+                            para_state = paraphrase_multichannel(paraphraser, state)
+                            paraphrased_states.append(para_state)
+                        else:
+                            paraphrased_states.append(state)
+                        layer_diffs.append({'was_paraphrased': was_paraphrased})
+                    
+                    # Create visualization subdirectories
+                    vis_base_dir = run_dir / 'visualizations'
+                    intermediates_dir = vis_base_dir / 'intermediate_states' / f'epoch_{epoch+1}'
+                    paraphraser_dir = vis_base_dir / 'paraphraser_samples'
+                    
+                    visualize_intermediates(
+                        images, images, intermediates, paraphrased_states, 
+                        layer_diffs, epoch, batch_idx, num_samples=3,
+                        save_path=intermediates_dir
+                    )
+                
+                # Save paraphraser visualization once per epoch
+                if epoch == 0:  # Only save paraphraser visualization once
+                    visualize_paraphrasing(
+                        paraphraser, train_loader, device, 
+                        num_samples=10, save_path=paraphraser_dir
+                    )
             
             if test_acc > best_acc and exp_dir:
                 best_acc = test_acc
@@ -281,15 +351,34 @@ def train_interpretable_classifier(
             
             print(f'Epoch {epoch+1}: Train Loss={train_loss:.4f}, '
                   f'Train Acc={train_acc:.2f}%, Test Acc={test_acc:.2f}%')
+            
+            # Calculate and display timing information
+            epoch_time = time.time() - epoch_start
+            total_time = time.time() - start_time
+            
+            print(f"\nEpoch {epoch + 1} completed in {timedelta(seconds=int(epoch_time))}")
+            print(f"Total training time so far: {timedelta(seconds=int(total_time))}")
+            print(f"Average time per epoch: {timedelta(seconds=int(total_time/(epoch+1)))}")
+            print(f"Test Accuracy: {test_acc:.2f}%")
+            print("-" * 50)
+        
+        # Final timing information
+        total_training_time = time.time() - start_time
+        print(f"\nTraining completed at {datetime.now().strftime('%H:%M:%S')}")
+        print(f"Total training time: {timedelta(seconds=int(total_training_time))}")
+        print(f"Average time per epoch: {timedelta(seconds=int(total_training_time/num_epochs))}")
         
         all_metrics.append(metrics_log)
     
     return all_metrics if num_runs > 1 else all_metrics[0]
 
 
-# visualise the paraphraser iimages with their original counterparts
-def visualize_paraphrasing(paraphraser, train_loader, device, num_samples=10):
-    """Helper function to visualize paraphrased images"""
+# visualise the paraphraser images with their original counterparts
+def visualize_paraphrasing(paraphraser, train_loader, device, num_samples=10, save_path: Path = None):
+    """
+    Helper function to visualize paraphrased images.
+    Optionally saves the visualization instead of displaying it.
+    """
     # Get a batch of images
     images, _ = next(iter(train_loader))
     images = images[:num_samples].to(device)
@@ -320,7 +409,14 @@ def visualize_paraphrasing(paraphraser, train_loader, device, num_samples=10):
             plt.title('Paraphrased')
     
     plt.tight_layout()
-    plt.show()
+    
+    if save_path:
+        # Create directory if it doesn't exist
+        save_path.mkdir(parents=True, exist_ok=True)
+        plt.savefig(save_path / f'paraphraser_samples.png', bbox_inches='tight')
+        plt.close()
+    else:
+        plt.show()
 
 def evaluate_model(model, test_loader, device):
     """Evaluate model on test set"""
@@ -341,17 +437,17 @@ def evaluate_model(model, test_loader, device):
     return 100 * correct / total
 
 def visualize_intermediates(original_input, paraphrased_input, layer_originals, 
-                          layer_paraphrased, layer_diffs, epoch, batch_idx, num_samples=1):
+                          layer_paraphrased, layer_diffs, epoch, batch_idx, 
+                          num_samples=1, save_path: Path = None):
     """
     Visualize random sample of images, their intermediate representations, and paraphrased versions.
-    Clearly indicates which versions were actually paraphrased vs copied.
+    Optionally saves the visualization instead of displaying it.
     """
-    # Set num_samples to 1 for brevity of output. Including a large number of samples gives better visibility over training
     batch_size = original_input.size(0)
     indices = torch.randperm(batch_size)[:num_samples]
     
     for idx in indices:
-        num_cols = len(layer_originals) + 1  # +1 for input
+        num_cols = len(layer_originals) + 1
         plt.figure(figsize=(3 * num_cols, 6))
         
         # Original input
@@ -361,7 +457,7 @@ def visualize_intermediates(original_input, paraphrased_input, layer_originals,
         plt.axis('off')
         
         # Input paraphrasing status and visualization
-        was_paraphrased = layer_diffs[0][-1]['was_paraphrased']
+        was_paraphrased = layer_diffs[0]['was_paraphrased']
         status = "Paraphrased" if was_paraphrased else "Original"
         plt.subplot(2, num_cols, num_cols + 1)
         
@@ -375,23 +471,41 @@ def visualize_intermediates(original_input, paraphrased_input, layer_originals,
         for i, (orig, para) in enumerate(zip(layer_originals, layer_paraphrased)):
             # Original layer output
             plt.subplot(2, num_cols, i + 2)
-            plt.imshow(orig[idx].detach().cpu().squeeze(), cmap='gray')
+            # Take mean across channels if multi-channel
+            if orig[idx].shape[0] > 1:
+                img_to_show = orig[idx].detach().cpu().mean(dim=0)  # Average across channels
+            else: # if not multi-channel. 
+                img_to_show = orig[idx].detach().cpu().squeeze()
+            plt.imshow(img_to_show, cmap='gray')
             plt.title(f'Layer {i+1}')
             plt.axis('off')
             
             # Paraphrasing status for this layer
-            was_paraphrased = layer_diffs[i+1][-1]['was_paraphrased']
+            was_paraphrased = layer_diffs[i+1]['was_paraphrased']
             status = "Paraphrased" if was_paraphrased else "Original"
             
             # Paraphrased or original version
             plt.subplot(2, num_cols, num_cols + i + 2)
-            plt.imshow(para[idx].detach().cpu().squeeze(), cmap='gray')
+            # Take mean across channels if multi-channel
+            if para[idx].shape[0] > 1:
+                img_to_show = para[idx].detach().cpu().mean(dim=0)  # Average across channels
+            else:
+                img_to_show = para[idx].detach().cpu().squeeze()
+            plt.imshow(img_to_show, cmap='gray')
             plt.title(f'L{i+1} ({status})')
             plt.axis('off')
         
         plt.suptitle(f'Epoch {epoch+1}, Step {batch_idx}, Sample {idx.item()}')
         plt.tight_layout()
-        plt.show()
+        
+        if save_path:
+            # Create directory if it doesn't exist
+            save_path.mkdir(parents=True, exist_ok=True)
+            plt.savefig(save_path / f'intermediates_epoch{epoch+1}_step{batch_idx}_sample{idx.item()}.png',
+                       bbox_inches='tight')
+            plt.close()
+        else:
+            plt.show()
 
 def plot_training_progress(metrics_log):
     """Plot comprehensive training metrics"""
@@ -479,28 +593,41 @@ def compare_training_results(metrics_logs):
 
 def save_training_visualizations(metrics_log, exp_dir: Path, epoch: int):
     """Save training visualizations to the experiment directory"""
-    fig = plt.figure(figsize=(20, 10))
+    # Clear any existing plots
+    plt.clf()
+    plt.close('all')
+    
+    # Create new figure with specific size and DPI
+    fig = plt.figure(figsize=(20, 10), dpi=100)
     
     # Plot accuracies
     plt.subplot(2, 2, 1)
-    plt.plot(metrics_log['train_acc'], label='Train')
-    plt.plot(metrics_log['test_acc'], label='Test')
-    plt.title('Classification Accuracy')
-    plt.xlabel('Epoch')
-    plt.ylabel('Accuracy (%)')
-    plt.legend()
+    plt.plot(metrics_log['train_acc'], label='Train', linewidth=2)
+    plt.plot(metrics_log['test_acc'], label='Test', linewidth=2)
+    plt.title('Classification Accuracy', fontsize=14)
+    plt.xlabel('Epoch', fontsize=12)
+    plt.ylabel('Accuracy (%)', fontsize=12)
+    plt.grid(True, alpha=0.3)
+    plt.legend(fontsize=12)
     
     # Plot losses
     plt.subplot(2, 2, 2)
-    plt.plot(metrics_log['train_loss'], label='Train Loss')
-    plt.title('Training Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
+    plt.plot(metrics_log['train_loss'], label='Train Loss', linewidth=2)
+    plt.title('Training Loss', fontsize=14)
+    plt.xlabel('Epoch', fontsize=12)
+    plt.ylabel('Loss', fontsize=12)
+    plt.grid(True, alpha=0.3)
     
-    # Save plot
-    plt.tight_layout()
-    plt.savefig(exp_dir / f"training_progress_epoch_{epoch+1}.png") # epoch counting from zero
-    plt.close()
+    # Ensure proper spacing between subplots
+    plt.tight_layout(pad=3.0)
+    
+    # Save plot with high quality
+    save_path = exp_dir / f"training_progress_epoch_{epoch+1}.png"
+    plt.savefig(save_path, bbox_inches='tight', dpi=100, format='png')
+    
+    # Clean up
+    plt.close(fig)
+    plt.close('all')
 
 def create_versioned_directory(base_path: Path, folder_name: str) -> Path:
     """
@@ -552,7 +679,7 @@ def main():
     layer_configs = [
         # (in_channels, out_channels)
         (1, 32),    # First layer expands channels
-        (32, 64),   # Increase feature complexity
+        (32, 64),   # Further increase feature complexity
         (64, 32),   # Gradually reduce channels
         (32, 16)    # Final interpretable representation
     ]
@@ -631,7 +758,7 @@ def main():
             f.write(f"Layer {i}: {in_ch} -> {out_ch} channels\n")
     
     for schedule_idx, schedule in enumerate(paraphrase_schedules):
-        print(f"Running schedule {schedule_idx} / {len(paraphrase_schedules)}") # allows tracking of progress
+        print(f"Running schedule {schedule_idx+1} / {len(paraphrase_schedules)}") # allows tracking of progress
         # Create schedule-specific directory
         if isinstance(schedule, (int, float)):
             schedule_name = f"constant_{schedule:.2f}"
