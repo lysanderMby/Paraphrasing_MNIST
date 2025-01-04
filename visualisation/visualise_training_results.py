@@ -197,7 +197,7 @@ def main():
     # Find all experiment directories
     exp_dirs = [d for d in models_dir.iterdir() 
                if d.is_dir() and d.name.startswith('layers_')]
-    
+
     if not exp_dirs:
         print(f"WARNING: No experiment directories found in {models_dir}")
         return
