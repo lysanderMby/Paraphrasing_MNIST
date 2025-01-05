@@ -1,0 +1,3 @@
+Schedule description: Custom schedule 1: [0.0, 0.25, 0.5]
+Schedule values: [0.0, 0.25, 0.5]
+Number of epochs: 3
