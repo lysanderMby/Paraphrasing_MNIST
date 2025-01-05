@@ -197,15 +197,20 @@ def train_interpretable_classifier(
         paraphraser = paraphraser.to(device)
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.01)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='max', factor=0.5, patience=2
-        )
+        # The scheduler seems to have little effect on the training process
+        #scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        #    optimizer, mode='max', factor=0.5, patience=2
+        #)
         
         metrics_log = {
             'paraphrase_schedule': prob_schedule,
             'train_acc': [],
             'train_loss': [],
             'test_acc': [],
+            'paraphrased_train_acc': [],  # New metrics
+            'paraphrased_train_loss': [],
+            'paraphrased_test_acc': [],
+            'paraphrased_test_loss': [],
             'layer_metrics': {}
         }
         
@@ -237,17 +242,34 @@ def train_interpretable_classifier(
                 images, labels = images.to(device), labels.to(device)
                 optimizer.zero_grad()
                 
+                # Randomly decide whether to paraphrase input images
+                if torch.rand(1).item() < current_prob:
+                    with torch.no_grad():
+                        images = paraphrase_multichannel(paraphraser, images)
+                
                 logits, intermediates = model(images, return_intermediates=True)
                 
-                # Apply current epoch's paraphrase probability
+                # Apply paraphrasing independently for each intermediate state and each item in batch
                 paraphrased = []
+                batch_size = intermediates[0].shape[0]
+                
                 for state in intermediates:
-                    if torch.rand(1).item() < current_prob:
+                    # Generate random mask for entire batch
+                    paraphrase_mask = (torch.rand(batch_size, 1, 1, 1, device=device) < current_prob)
+                    
+                    # Initialize paraphrased state as a copy of original
+                    para_state = state.clone()
+                    
+                    # Only paraphrase states where mask is True
+                    if paraphrase_mask.any():
                         with torch.no_grad():
-                            para_state = paraphrase_multichannel(paraphraser, state)
-                        paraphrased.append(para_state)
-                    else:
-                        paraphrased.append(state)
+                            # Paraphrase only the selected items in batch
+                            selected_states = state[paraphrase_mask.squeeze()]
+                            if selected_states.numel() > 0:  # Check if any states were selected
+                                para_selected = paraphrase_multichannel(paraphraser, selected_states)
+                                para_state[paraphrase_mask.squeeze()] = para_selected
+                    
+                    paraphrased.append(para_state)
                 
                 class_loss = criterion(logits, labels)
                 reg_loss = sum(F.mse_loss(inter, para) 
@@ -267,73 +289,59 @@ def train_interpretable_classifier(
             train_acc = 100 * correct / total
             train_loss = epoch_loss / len(train_loader)
             
-            # Test without progress bar
+            # Evaluating the model on the original and paraphrased datasets
             model.eval()
-            test_loss = 0
-            correct = 0
-            print("\nEvaluating...", end=' ')
-            with torch.no_grad():
-                for images, labels in test_loader:
-                    images = images.to(device)
-                    labels = labels.to(device)
-                    
-                    outputs = model(images)
-                    test_loss += criterion(outputs, labels).item()
-                    _, predicted = torch.max(outputs.data, 1)
-                    correct += (predicted == labels).sum().item()
+            print("\nEvaluating on original and paraphrased datasets...")
             
-            test_acc = 100 * correct / len(test_loader.dataset)
+            # Evaluate on original datasets
+            print("Original datasets...", end=' ')
+            train_acc, train_loss = evaluate_model(
+                model=model, 
+                data_loader=train_loader, 
+                paraphraser=None,  # Explicitly specify no paraphrasing
+                device=device
+            )
+            test_acc, test_loss = evaluate_model(
+                model=model, 
+                data_loader=test_loader, 
+                paraphraser=None,
+                device=device
+            )
             
-            scheduler.step(test_acc)
+            # Evaluate on fully paraphrased datasets
+            print("Paraphrased datasets...", end=' ')
+            para_train_acc, para_train_loss = evaluate_model(
+                model=model, 
+                data_loader=train_loader, 
+                paraphraser=paraphraser,  # Use paraphraser
+                device=device
+            )
+            para_test_acc, para_test_loss = evaluate_model(
+                model=model, 
+                data_loader=test_loader, 
+                paraphraser=paraphraser,
+                device=device
+            )
             
+            # Store all metrics
             metrics_log['train_acc'].append(train_acc)
             metrics_log['train_loss'].append(train_loss)
             metrics_log['test_acc'].append(test_acc)
+            metrics_log['paraphrased_train_acc'].append(para_train_acc)
+            metrics_log['paraphrased_train_loss'].append(para_train_loss)
+            metrics_log['paraphrased_test_acc'].append(para_test_acc)
+            metrics_log['paraphrased_test_loss'].append(para_test_loss)
             
+            print("\nEpoch {} Results:".format(epoch + 1))
+            print("Original Data - Train Acc: {:.2f}%, Test Acc: {:.2f}%".format(
+                train_acc, test_acc))
+            print("Original Data - Train Loss: {:.4f}".format(train_loss))
+            print("Paraphrased Data - Train Acc: {:.2f}%, Test Acc: {:.2f}%".format(
+                para_train_acc, para_test_acc))
+            print("Paraphrased Data - Train Loss: {:.4f}".format(para_train_loss))
+
             if exp_dir:
-                run_dir = exp_dir / f"run_{run_idx}"
-                run_dir.mkdir(exist_ok=True)
-                
-                # Save training progress plots
-                save_training_visualizations(metrics_log, run_dir, epoch)
-                
-                # Save intermediate states visualization
-                intermediates_dir = run_dir / 'intermediate_states' / f'epoch_{epoch+1}'
-                images, _ = next(iter(train_loader))
-                images = images.to(device)
-                
-                with torch.no_grad():
-                    logits, intermediates = model(images, return_intermediates=True)
-                    # Generate paraphrased versions and track which were paraphrased
-                    paraphrased_states = []
-                    layer_diffs = [{'was_paraphrased': False}]  # Initial state for input
-                    
-                    for state in intermediates:
-                        was_paraphrased = torch.rand(1).item() < current_prob
-                        if was_paraphrased:
-                            para_state = paraphrase_multichannel(paraphraser, state)
-                            paraphrased_states.append(para_state)
-                        else:
-                            paraphrased_states.append(state)
-                        layer_diffs.append({'was_paraphrased': was_paraphrased})
-                    
-                    # Create visualization subdirectories
-                    vis_base_dir = run_dir / 'visualizations'
-                    intermediates_dir = vis_base_dir / 'intermediate_states' / f'epoch_{epoch+1}'
-                    paraphraser_dir = vis_base_dir / 'paraphraser_samples'
-                    
-                    visualize_intermediates(
-                        images, images, intermediates, paraphrased_states, 
-                        layer_diffs, epoch, batch_idx, num_samples=3,
-                        save_path=intermediates_dir
-                    )
-                
-                # Save paraphraser visualization once per epoch
-                if epoch == 0:  # Only save paraphraser visualization once
-                    visualize_paraphrasing(
-                        paraphraser, train_loader, device, 
-                        num_samples=10, save_path=paraphraser_dir
-                    )
+                save_training_visualizations(metrics_log, exp_dir, epoch)
             
             if test_acc > best_acc and exp_dir:
                 best_acc = test_acc
@@ -418,23 +426,45 @@ def visualize_paraphrasing(paraphraser, train_loader, device, num_samples=10, sa
     else:
         plt.show()
 
-def evaluate_model(model, test_loader, device):
-    """Evaluate model on test set"""
+def evaluate_model(model, data_loader, paraphraser=None, device='cuda'):
+    """
+    Evaluate model on a dataset, with option to paraphrase all inputs
+    
+    Args:
+        model: Model to evaluate
+        data_loader: DataLoader for evaluation
+        paraphraser: If provided, paraphrase all inputs before evaluation
+        device: Device to run evaluation on
+    
+    Returns:
+        tuple: (accuracy, average loss)
+    """
     model.eval()
     correct = 0
     total = 0
+    total_loss = 0
+    criterion = nn.CrossEntropyLoss()
     
     with torch.no_grad():
-        for images, labels in test_loader:
+        for images, labels in data_loader:
             images = images.to(device)
             labels = labels.to(device)
             
+            # Paraphrase inputs if paraphraser provided
+            if paraphraser is not None:
+                images = paraphrase_multichannel(paraphraser, images)
+            
             outputs = model(images)
+            loss = criterion(outputs, labels)
+            total_loss += loss.item()
+            
             _, predicted = torch.max(outputs.data, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
     
-    return 100 * correct / total
+    accuracy = 100 * correct / total
+    avg_loss = total_loss / len(data_loader)
+    return accuracy, avg_loss
 
 def visualize_intermediates(original_input, paraphrased_input, layer_originals, 
                           layer_paraphrased, layer_diffs, epoch, batch_idx, 
@@ -592,36 +622,62 @@ def compare_training_results(metrics_logs):
     plt.show()
 
 def save_training_visualizations(metrics_log, exp_dir: Path, epoch: int):
-    """Save training visualizations to the experiment directory"""
-    # Clear any existing plots
+    """Save training visualizations including paraphrased dataset performance"""
     plt.clf()
     plt.close('all')
     
-    # Create new figure with specific size and DPI
-    fig = plt.figure(figsize=(20, 10), dpi=100)
+    # Create figure with 2x2 subplots
+    fig = plt.figure(figsize=(20, 15), dpi=100)
     
-    # Plot accuracies
+    # Plot accuracies on original data
     plt.subplot(2, 2, 1)
-    plt.plot(metrics_log['train_acc'], label='Train', linewidth=2)
-    plt.plot(metrics_log['test_acc'], label='Test', linewidth=2)
-    plt.title('Classification Accuracy', fontsize=14)
+    plt.plot(metrics_log['train_acc'], label='Train', linewidth=2, color='blue')
+    plt.plot(metrics_log['test_acc'], label='Test', linewidth=2, color='red')
+    plt.title('Classification Accuracy (Original Data)', fontsize=14)
     plt.xlabel('Epoch', fontsize=12)
     plt.ylabel('Accuracy (%)', fontsize=12)
     plt.grid(True, alpha=0.3)
     plt.legend(fontsize=12)
     
-    # Plot losses
+    # Plot accuracies on paraphrased data
     plt.subplot(2, 2, 2)
-    plt.plot(metrics_log['train_loss'], label='Train Loss', linewidth=2)
-    plt.title('Training Loss', fontsize=14)
+    plt.plot(metrics_log['paraphrased_train_acc'], label='Paraphrased Train', 
+             linewidth=2, color='blue', linestyle='--')
+    plt.plot(metrics_log['paraphrased_test_acc'], label='Paraphrased Test', 
+             linewidth=2, color='red', linestyle='--')
+    plt.title('Classification Accuracy (Paraphrased Data)', fontsize=14)
+    plt.xlabel('Epoch', fontsize=12)
+    plt.ylabel('Accuracy (%)', fontsize=12)
+    plt.grid(True, alpha=0.3)
+    plt.legend(fontsize=12)
+    
+    # Plot losses on original data
+    plt.subplot(2, 2, 3)
+    plt.plot(metrics_log['train_loss'], label='Original Train', linewidth=2, color='blue')
+    plt.title('Loss (Original Data)', fontsize=14)
     plt.xlabel('Epoch', fontsize=12)
     plt.ylabel('Loss', fontsize=12)
     plt.grid(True, alpha=0.3)
+    plt.legend(fontsize=12)
+    
+    # Plot losses on paraphrased data
+    plt.subplot(2, 2, 4)
+    plt.plot(metrics_log['paraphrased_train_loss'], 
+             label='Paraphrased Train', linewidth=2, 
+             color='blue', linestyle='--')
+    plt.title('Loss (Paraphrased Data)', fontsize=14)
+    plt.xlabel('Epoch', fontsize=12)
+    plt.ylabel('Loss', fontsize=12)
+    plt.grid(True, alpha=0.3)
+    plt.legend(fontsize=12)
+    
+    # Add overall title
+    plt.suptitle(f'Training Progress - Epoch {epoch+1}', fontsize=16, y=1.02)
     
     # Ensure proper spacing between subplots
     plt.tight_layout(pad=3.0)
     
-    # Save plot with high quality
+    # Save plot
     save_path = exp_dir / f"training_progress_epoch_{epoch+1}.png"
     plt.savefig(save_path, bbox_inches='tight', dpi=100, format='png')
     
