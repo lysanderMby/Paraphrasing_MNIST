@@ -20,6 +20,15 @@ from initial_classifier.training_initial_classifier import PretrainedClassifier
 from paraphraser.training_paraphraser import ImageParaphraser
 from interpretable.interpretable_classifier import train_interpretable_classifier, InterpretableClassifier
 
+TEST_MODE = True  # Flag to control test mode
+
+def get_reduced_dataset(dataset, reduction_factor=100):
+    """
+    Reduce dataset size by taking every nth sample
+    """
+    indices = range(0, len(dataset), reduction_factor)
+    return torch.utils.data.Subset(dataset, indices)
+
 def main():
     """Finds or trains a classifier, paraphraser, and finally interpretable classifier.
     This is done with appropriate paraphrasing probabilities as found in the paraphrase_schedules list."""
@@ -34,18 +43,30 @@ def main():
     models_dir = root_dir / 'models'
     #models_dir.mkdir(exist_ok=True) # if this directory is not present, an error should be created clearly
     
-    # Define model architecture configurations
-    layer_configs = [
-        # (in_channels, out_channels)
-        (1, 32),    # First layer expands channels
-        (32, 48),   # Increase feature complexity
-        (48, 64),   # Increase feature complexity
-        (64, 64),   # Intermediate layers as a test of increasing layers
-        (64, 64),
-        (64, 64),
-        (64, 32),   # Gradually reduce channels
-        (32, 16)    # Final interpretable representation
-    ]
+    # Define model architecture configurations based on test mode
+    if TEST_MODE:
+        print("\nRunning in TEST MODE - using simplified configuration")
+        layer_configs = [
+            (1, 32),
+            (32, 1)
+        ]
+        batch_size = 32
+        num_epochs = 3
+        num_workers = 0  # Reduce workers for testing
+    else: # Main configurations to be run when not doing activate bug fixes
+        layer_configs = [
+            (1, 32),    # First layer expands channels
+            (32, 48),   # Increase feature complexity
+            (48, 64),   # Increase feature complexity
+            (64, 64),   # Intermediate layers
+            (64, 64),
+            (64, 64),
+            (64, 32),   # Gradually reduce channels
+            (32, 16)    # Final interpretable representation
+        ]
+        batch_size = 64
+        num_epochs = 3
+        num_workers = 4
     
     # Setup data loading
     transform = transforms.Compose([
@@ -58,10 +79,16 @@ def main():
     test_dataset = torchvision.datasets.MNIST(root=str(data_dir), train=False,
                                             download=True, transform=transform)
     
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, 
-                            pin_memory=True, num_workers=4)
-    test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False, 
-                            pin_memory=True, num_workers=4)
+    # Reduce dataset size if in test mode
+    if TEST_MODE:
+        train_dataset = get_reduced_dataset(train_dataset)
+        test_dataset = get_reduced_dataset(test_dataset)
+        print(f"Reduced dataset sizes - Train: {len(train_dataset)}, Test: {len(test_dataset)}")
+    
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, 
+                            pin_memory=True, num_workers=num_workers)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, 
+                            pin_memory=True, num_workers=num_workers)
     
     # Load prerequisite models
     classifier = PretrainedClassifier()
@@ -89,20 +116,24 @@ def main():
     paraphraser.to(device)
     paraphraser.eval()
     
-    # Define training schedules
-    num_epochs = 10  # Define number of epochs. Currently constant across experiments
-    
-    # Define different probability schedules to test
-    paraphrase_schedules = [
-        # Constant probabilities
-        0.01,
-        0.1,
-        0.5,
-        # Linear increase schedules
-        [i * 0.5 / (num_epochs - 1) for i in range(num_epochs)],  # 0.0 to 0.5
-        # Custom schedules
-        [0.01] * 2 + [0.02] * 3 + [0.1] * 5,  # 10% for 5 epochs, then 30%
-    ]
+    # Modify paraphrase schedules based on test mode
+    if TEST_MODE:
+        paraphrase_schedules = [
+            0.2,
+            [i * 0.5 / (num_epochs - 1) for i in range(num_epochs)],
+            [0, 0.5, 1]
+        ]
+    else:
+        paraphrase_schedules = [
+            # Constant probabilities
+            0.01,
+            0.1,
+            0.5,
+            # Linear increase schedules
+            [i * 0.5 / (num_epochs - 1) for i in range(num_epochs)],  # 0.0 to 0.5
+            # Custom schedules
+            [0.01] * 2 + [0.02] * 3 + [0.1] * 5,  # 10% for 5 epochs, then 30%
+        ]
     
     print("\nTraining interpretable classifiers with different paraphrasing schedules...")
     print(f"Total schedules to train: {len(paraphrase_schedules)}")
@@ -118,6 +149,10 @@ def main():
         f.write("Layer configurations:\n")
         for i, (in_ch, out_ch) in enumerate(layer_configs):
             f.write(f"Layer {i}: {in_ch} -> {out_ch} channels\n")
+
+    # Print layer configurations
+    for i, (in_ch, out_ch) in enumerate(layer_configs):
+        print(f"Layer {i}: {in_ch} -> {out_ch} channels")
     
     total_start_time = time.time()
     print(f"Starting full training run at {datetime.now().strftime('%H:%M:%S')}")
@@ -139,7 +174,7 @@ def main():
         schedule_dir = exp_root / schedule_name
         schedule_dir.mkdir(exist_ok=True)
         
-        model = InterpretableClassifier(layer_configs)
+        model = InterpretableClassifier(layer_configs) # reinitialise the model
         print(f"Total interpretable classifier parameter number is {model.get_param_count()}")
         
         # Save schedule configuration
@@ -175,7 +210,9 @@ def main():
         print(f"Total training time so far: {timedelta(seconds=int(total_time))}")
         if remaining_schedules > 0:
             print(f"Estimated time remaining: {timedelta(seconds=int(estimated_remaining))}")
-            print(f"Estimated completion time: {(datetime.now() + timedelta(seconds=int(estimated_remaining))).strftime('%H:%M:%S')}")
+            print(f"""Estimated completion time: 
+                  {(datetime.now() + timedelta(seconds=int(estimated_remaining))).strftime('%H:%M:%S')} 
+                  on {(datetime.now() + timedelta(seconds=int(estimated_remaining))).strftime('%d/%m/%Y')}""")
         print("=" * 50)
     
     # Final timing information
