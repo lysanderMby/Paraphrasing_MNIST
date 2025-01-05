@@ -1,0 +1,5 @@
+Schedule description: 20% constant paraphrasing
+Schedule values: 0.2
+Number of epochs: 3
+Dataset sizes - Train: 600, Test: 100
+TEST RUN

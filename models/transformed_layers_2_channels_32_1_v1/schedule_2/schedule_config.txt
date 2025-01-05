@@ -1,0 +1,5 @@
+Schedule description: Custom schedule 2: [0, 0.5, 1]
+Schedule values: [0, 0.5, 1]
+Number of epochs: 3
+Dataset sizes - Train: 600, Test: 100
+TEST RUN
