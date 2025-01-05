@@ -18,7 +18,8 @@ from datetime import datetime, timedelta
 # Import from project modules
 from initial_classifier.training_initial_classifier import PretrainedClassifier
 from paraphraser.training_paraphraser import ImageParaphraser
-from interpretable.interpretable_classifier import train_interpretable_classifier, InterpretableClassifier
+from interpretable.interpretable_classifier import train_interpretable_classifier, create_versioned_directory
+from interpretable.model_architectures import MODEL_ARCHITECTURES
 
 TEST_MODE = True  # Flag to control test mode
 
@@ -138,18 +139,21 @@ def main():
     print("\nTraining interpretable classifiers with different paraphrasing schedules...")
     print(f"Total schedules to train: {len(paraphrase_schedules)}")
     print("-" * 50)
+
+    # Define model architecture name (default if not specified)
+    model_architecture = 'simple'  # To apply the default ResNet18-based classifier use 'default'
     
-    # Create experiment root directory with layer config name
-    exp_name = f"layers_{len(layer_configs)}_channels_" + "_".join(str(cfg[1]) for cfg in layer_configs)
-    exp_root = models_dir / exp_name
-    exp_root.mkdir(exist_ok=True)
+    # Create experiment root directory with architecture name and layer config
+    exp_name = f"{model_architecture}_layers_{len(layer_configs)}_channels_" + "_".join(str(cfg[1]) for cfg in layer_configs)
+    exp_root = create_versioned_directory(models_dir, exp_name)
     
-    # Save layer configuration
+    # Save configuration
     with open(exp_root / "architecture_config.txt", "w") as f:
+        f.write(f"Model architecture: {model_architecture}\n")
         f.write("Layer configurations:\n")
         for i, (in_ch, out_ch) in enumerate(layer_configs):
             f.write(f"Layer {i}: {in_ch} -> {out_ch} channels\n")
-
+    
     # Print layer configurations
     for i, (in_ch, out_ch) in enumerate(layer_configs):
         print(f"Layer {i}: {in_ch} -> {out_ch} channels")
@@ -174,8 +178,11 @@ def main():
         schedule_dir = exp_root / schedule_name
         schedule_dir.mkdir(exist_ok=True)
         
-        model = InterpretableClassifier(layer_configs) # reinitialise the model
-        print(f"Total interpretable classifier parameter number is {model.get_param_count()}")
+        # Create model using selected architecture
+        ModelClass = MODEL_ARCHITECTURES[model_architecture]
+        model = ModelClass(layer_configs)
+        print(f"\nUsing {model_architecture} architecture")
+        print(f"Total interpretable classifier parameter count: {model.get_param_count()}")
         
         # Save schedule configuration
         with open(schedule_dir / "schedule_config.txt", "w") as f:
