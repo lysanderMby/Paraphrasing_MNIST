@@ -32,6 +32,7 @@ import json
 import re
 import time
 from datetime import datetime, timedelta
+from model_architectures import MODEL_ARCHITECTURES
 
 # Add parent directory to Python path to enable imports from sibling directories
 project_root = Path(__file__).resolve().parent.parent  # Going to the true parent
@@ -40,70 +41,6 @@ sys.path.append(str(project_root))
 # Import from other modules
 from initial_classifier.training_initial_classifier import train_classifier, PretrainedClassifier
 from paraphraser.training_paraphraser import train_paraphraser, ImageParaphraser
-
-class InterpretableClassifier(nn.Module):
-    """Classifier with customizable interpretable intermediate representations"""
-    def __init__(self, layer_configs: List[Tuple[int, int]], num_classes: int = 10):
-        """
-        Args:
-            layer_configs: List of tuples (in_channels, out_channels) for each layer
-            num_classes: Number of output classes
-        """
-        super().__init__()
-        self.layers = nn.ModuleList()
-        self.residual_projections = nn.ModuleList()
-        
-        for in_channels, out_channels in layer_configs:
-            # Main convolutional block
-            layer = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels*2, kernel_size=3, padding=1),
-                nn.BatchNorm2d(out_channels*2),
-                nn.ReLU(),
-                nn.Conv2d(out_channels*2, out_channels, kernel_size=3, padding=1),
-                nn.BatchNorm2d(out_channels),
-                nn.ReLU()
-            )
-            self.layers.append(layer)
-            
-            # Residual projection if needed
-            if in_channels != out_channels:
-                proj = nn.Conv2d(in_channels, out_channels, kernel_size=1)
-            else:
-                proj = nn.Identity()
-            self.residual_projections.append(proj)
-        
-        # Calculate total flattened size for final layer
-        final_channels = layer_configs[-1][1]
-        self.classifier = nn.Sequential(
-            nn.AdaptiveAvgPool2d((7, 7)),  # Adaptive pooling to fixed size
-            nn.Flatten(),
-            nn.Linear(final_channels * 7 * 7, 512),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(512, num_classes)
-        )
-        
-    def get_param_count(self):
-        """Return total number of parameters"""
-        return sum(p.numel() for p in self.parameters())
-        
-    def forward(self, x, return_intermediates=False):
-        intermediates = []
-        current = x
-        
-        for layer, proj in zip(self.layers, self.residual_projections):
-            # Apply main layer
-            layer_out = layer(current)
-            # Add residual connection
-            residual = proj(current)
-            current = layer_out + residual
-            intermediates.append(current)
-        
-        logits = self.classifier(current)
-        
-        if return_intermediates:
-            return logits, intermediates
-        return logits
 
 def paraphrase_multichannel(paraphraser, state):
     """
@@ -142,7 +79,7 @@ def train_interpretable_classifier(
     Train the interpretable classifier with support for probability schedules.
     
     Args:
-        model: The model to train
+        model: The model to train (instance of a model from model_architectures)
         paraphraser: The paraphraser model
         train_loader: Training data loader
         test_loader: Test data loader
@@ -685,38 +622,26 @@ def save_training_visualizations(metrics_log, exp_dir: Path, epoch: int):
     plt.close(fig)
     plt.close('all')
 
-def create_versioned_directory(base_path: Path, folder_name: str) -> Path:
+def create_versioned_directory(base_dir: Path, name: str) -> Path:
     """
-    Creates a versioned directory. If the directory already exists,
-    adds a version number (v1, v2, etc.) to create a unique path.
+    Create a versioned directory to avoid overwriting existing experiments.
+    
+    Args:
+        base_dir: Base directory for experiments
+        name: Base name for the experiment directory
+        
+    Returns:
+        Path: Path to the created directory
     """
-    # First try without version number
-    target_path = base_path / folder_name
-    if not target_path.exists():
-        target_path.mkdir(parents=True, exist_ok=False)
-        return target_path
-        
-    # Find existing versions
-    version_pattern = re.compile(rf"^{re.escape(folder_name)}_v(\d+)$")
-    existing_versions = []
-    
-    for path in base_path.iterdir():
-        if path.is_dir():
-            match = version_pattern.match(path.name)
-            if match:
-                existing_versions.append(int(match.group(1)))
-    
-    # If no versions exist yet, start with v1
-    if not existing_versions:
-        new_version = 1
-    else:
-        new_version = max(existing_versions) + 1
-        
-    # Create new versioned directory
-    versioned_path = base_path / f"{folder_name}_v{new_version}"
-    versioned_path.mkdir(parents=True, exist_ok=False)
-    
-    return versioned_path
+    base_dir.mkdir(exist_ok=True)
+    version = 1
+    while True:
+        versioned_name = f"{name}_v{version}"
+        dir_path = base_dir / versioned_name
+        if not dir_path.exists():
+            dir_path.mkdir()
+            return dir_path
+        version += 1
 
 
 def main():
@@ -793,7 +718,7 @@ def main():
         #1.0,    # 100% paraphrasing
         
         # Linear increase schedules
-        [(i+1) * 0.2 / (num_epochs - 1) for i in range(num_epochs)],  # 0.0 to 0.2
+        [(i) * 0.2 / (num_epochs - 1) for i in range(num_epochs)],  # 0.0 to 0.2
         [i * 0.5 / (num_epochs - 1) for i in range(num_epochs)],  # 0.0 to 0.5
         
         # Custom schedules
@@ -805,6 +730,7 @@ def main():
     
     # Create experiment root directory with layer config name
     exp_name = f"layers_{len(layer_configs)}_channels_" + "_".join(str(cfg[1]) for cfg in layer_configs)
+    print(f'Using experiment directory {exp_name}')
     exp_root = create_versioned_directory(models_dir, exp_name)
     
     # Save layer configuration
@@ -827,7 +753,10 @@ def main():
         schedule_dir.mkdir(exist_ok=True)
         
         print(f"\nTraining classifier with {schedule_desc}")
-        model = InterpretableClassifier(layer_configs)
+        model_architecture = 'default'
+        ModelClass = MODEL_ARCHITECTURES[model_architecture]
+        model = ModelClass(layer_configs)
+        print(f"\nUsing {model_architecture} architecture")
         print(f"\nTotal interpretable classifier parameter number is {model.get_param_count()}")
         
         # Save schedule configuration
