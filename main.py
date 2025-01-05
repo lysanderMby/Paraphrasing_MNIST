@@ -182,7 +182,7 @@ def main():
             f.write(f"Schedule description: {schedule_desc}\n")
             f.write(f"Schedule values: {schedule}\n")
             f.write(f"Number of epochs: {num_epochs}\n")
-            f.write(f"Dataset sizes - Train: {len(train_dataset)}, Test: {len(test_dataset)}")
+            f.write(f"Dataset sizes - Train: {len(train_dataset)}, Test: {len(test_dataset)}\n")
             if TEST_MODE:
                 f.write(f"TEST RUN") # Mark when a run is intended as a test. All relevant information should be made available
         
