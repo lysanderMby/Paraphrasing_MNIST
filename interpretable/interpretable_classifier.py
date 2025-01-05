@@ -32,7 +32,7 @@ import json
 import re
 import time
 from datetime import datetime, timedelta
-from model_architectures import MODEL_ARCHITECTURES
+from .model_architectures import MODEL_ARCHITECTURES
 
 # Add parent directory to Python path to enable imports from sibling directories
 project_root = Path(__file__).resolve().parent.parent  # Going to the true parent
@@ -278,7 +278,49 @@ def train_interpretable_classifier(
             print("Paraphrased Data - Train Loss: {:.4f}".format(para_train_loss))
 
             if exp_dir:
-                save_training_visualizations(metrics_log, exp_dir, epoch)
+                run_dir = exp_dir / f"run_{run_idx}"
+                run_dir.mkdir(exist_ok=True)
+                
+                # Save training progress plots
+                save_training_visualizations(metrics_log, run_dir, epoch)
+                
+                # Save intermediate states visualization
+                intermediates_dir = run_dir / 'intermediate_states' / f'epoch_{epoch+1}'
+                images, _ = next(iter(train_loader))
+                images = images.to(device)
+                
+                with torch.no_grad():
+                    logits, intermediates = model(images, return_intermediates=True)
+                    # Generate paraphrased versions and track which were paraphrased
+                    paraphrased_states = []
+                    layer_diffs = [{'was_paraphrased': False}]  # Initial state for input
+                    
+                    for state in intermediates:
+                        was_paraphrased = torch.rand(1).item() < current_prob
+                        if was_paraphrased:
+                            para_state = paraphrase_multichannel(paraphraser, state)
+                            paraphrased_states.append(para_state)
+                        else:
+                            paraphrased_states.append(state)
+                        layer_diffs.append({'was_paraphrased': was_paraphrased})
+                    
+                    # Create visualization subdirectories
+                    vis_base_dir = run_dir / 'visualizations'
+                    intermediates_dir = vis_base_dir / 'intermediate_states' / f'epoch_{epoch+1}'
+                    paraphraser_dir = vis_base_dir / 'paraphraser_samples'
+                    
+                    visualize_intermediates(
+                        images, images, intermediates, paraphrased_states, 
+                        layer_diffs, epoch, batch_idx, num_samples=3,
+                        save_path=intermediates_dir
+                    )
+                
+                # Save paraphraser visualization once per epoch
+                if epoch == 0:  # Only save paraphraser visualization once
+                    visualize_paraphrasing(
+                        paraphraser, train_loader, device, 
+                        num_samples=10, save_path=paraphraser_dir
+                    )
             
             if test_acc > best_acc and exp_dir:
                 best_acc = test_acc
