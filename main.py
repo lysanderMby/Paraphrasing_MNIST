@@ -21,7 +21,8 @@ from paraphraser.training_paraphraser import ImageParaphraser
 from interpretable.interpretable_classifier import train_interpretable_classifier, create_versioned_directory
 from interpretable.model_architectures import MODEL_ARCHITECTURES
 
-TEST_MODE = True  # Flag to control test mode
+TEST_MODE = False  # Flag to control test mode
+model_architecture = 'transformed'
 
 def get_reduced_dataset(dataset, reduction_factor=100):
     """
@@ -57,16 +58,12 @@ def main():
     else: # Main configurations to be run when not doing activate bug fixes
         layer_configs = [
             (1, 32),    # First layer expands channels
-            (32, 48),   # Increase feature complexity
-            (48, 64),   # Increase feature complexity
-            (64, 64),   # Intermediate layers
-            (64, 64),
-            (64, 64),
+            (32, 64),   # Increase feature complexity
             (64, 32),   # Gradually reduce channels
-            (32, 16)    # Final interpretable representation
+            (32, 1)    # Final interpretable representation
         ]
         batch_size = 64
-        num_epochs = 3
+        num_epochs = 10
         num_workers = 4
     
     # Setup data loading
@@ -119,29 +116,29 @@ def main():
     
     # Modify paraphrase schedules based on test mode
     if TEST_MODE:
+        # note that this assumes 3 epochs
         paraphrase_schedules = [
             0.2,
             [i * 0.5 / (num_epochs - 1) for i in range(num_epochs)],
             [0, 0.5, 1]
         ]
     else:
+        # Note that this assumes 10 epochs
         paraphrase_schedules = [
             # Constant probabilities
-            0.01,
-            0.1,
+            0,
+            0.2,
             0.5,
+            1,
             # Linear increase schedules
             [i * 0.5 / (num_epochs - 1) for i in range(num_epochs)],  # 0.0 to 0.5
             # Custom schedules
-            [0.01] * 2 + [0.02] * 3 + [0.1] * 5,  # 10% for 5 epochs, then 30%
+            [0] * 2 + [0.1] * 3 + [0.2] * 3 + [0.3] * 2,  # Gradually increasing amount
         ]
     
     print("\nTraining interpretable classifiers with different paraphrasing schedules...")
     print(f"Total schedules to train: {len(paraphrase_schedules)}")
     print("-" * 50)
-
-    # Define model architecture name (default if not specified)
-    model_architecture = 'simple'  # To apply the default ResNet18-based classifier use 'default'
     
     # Create experiment root directory with architecture name and layer config
     exp_name = f"{model_architecture}_layers_{len(layer_configs)}_channels_" + "_".join(str(cfg[1]) for cfg in layer_configs)
