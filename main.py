@@ -143,6 +143,7 @@ def main():
     # Create experiment root directory with architecture name and layer config
     exp_name = f"{model_architecture}_layers_{len(layer_configs)}_channels_" + "_".join(str(cfg[1]) for cfg in layer_configs)
     exp_root = create_versioned_directory(models_dir, exp_name)
+    print(f'Using the experiment directory: {exp_root}')
     
     # Save configuration
     with open(exp_root / "architecture_config.txt", "w") as f:
